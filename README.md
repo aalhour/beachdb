@@ -70,9 +70,11 @@ To keep BeachDB small and finishable, these are intentionally out of scope for S
 - `docs/articles.md` — Season 1 writing plan (≤ 12 posts)
 -->
 
-## Philosophy (one sentence)
+## Philosophy
 
 > Every chapter ends with evidence: a dump tool, a crash test, a benchmark, or a diagram.
+
+See [docs/principles.md](docs/principles.md) to see how I'm keeping this project from turning into a second job :)
 
 ## License
 
