@@ -1,0 +1,178 @@
+# golangci-lint v2 configuration for BeachDB
+# Enforces idiomatic Go, modern stdlib usage, and code quality
+
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  # Start with default linters, then add more
+  default: standard
+  enable:
+    # ─────────────────────────────────────────────────────────────────────────
+    # Modernization: Use modern Go features and stdlib
+    # ─────────────────────────────────────────────────────────────────────────
+    - modernize       # Suggests modern Go idioms (slices.Contains, etc.)
+    - usestdlibvars   # Detect cases where stdlib vars should be used
+    - perfsprint      # Use strconv instead of fmt.Sprintf where possible
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Code complexity
+    # ─────────────────────────────────────────────────────────────────────────
+    - gocyclo         # Cyclomatic complexity
+    - gocognit        # Cognitive complexity
+    - funlen          # Function length
+    - nestif          # Deeply nested if statements
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Error handling
+    # ─────────────────────────────────────────────────────────────────────────
+    - errorlint       # Proper error wrapping and comparison
+    - wrapcheck       # Ensure errors from external packages are wrapped
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Context and concurrency
+    # ─────────────────────────────────────────────────────────────────────────
+    - contextcheck    # Check context.Context usage
+    - noctx           # Detect http requests without context
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Style and formatting
+    # ─────────────────────────────────────────────────────────────────────────
+    - revive          # Extensible linter (replaces golint)
+    - misspell        # Catch spelling mistakes
+    - whitespace      # Detect unnecessary whitespace
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Bug detection
+    # ─────────────────────────────────────────────────────────────────────────
+    - bodyclose       # Check HTTP response body is closed
+    - durationcheck   # Detect bad time.Duration multiplication
+    - nilerr          # Check for returning nil when err is not nil
+    - nilnil          # Detect returning (nil, nil)
+    - rowserrcheck    # Check sql.Rows.Err() is called
+    - sqlclosecheck   # Check sql.Rows/Stmt are closed
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Code hygiene
+    # ─────────────────────────────────────────────────────────────────────────
+    - unconvert       # Remove unnecessary type conversions
+    - unparam         # Find unused function parameters
+    - wastedassign    # Find wasted assignments
+    - prealloc        # Suggest preallocating slices
+    - copyloopvar     # Detect loop variable copy issues (Go 1.22+)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Security
+    # ─────────────────────────────────────────────────────────────────────────
+    - gosec           # Security-oriented checks
+
+  settings:
+    # Cyclomatic complexity threshold
+    gocyclo:
+      min-complexity: 15
+
+    # Cognitive complexity threshold
+    gocognit:
+      min-complexity: 20
+
+    # Function length limits
+    funlen:
+      lines: 100
+      statements: 50
+
+    # Nested if depth
+    nestif:
+      min-complexity: 5
+
+    # Error lint settings
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+
+    # Revive settings (style linter)
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+    # gosec settings
+    gosec:
+      excludes:
+        - G104  # Audit errors not checked (covered by errcheck)
+
+    # Wrapcheck: don't require wrapping errors from stdlib
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+      ignore-package-globs:
+        - encoding/*
+        - github.com/aalhour/beachdb/*
+
+    # Misspell settings
+    misspell:
+      locale: US
+
+  exclusions:
+    # Use some standard exclusion presets
+    presets:
+      - std-error-handling
+    rules:
+      # Exclude some linters from running on tests
+      - path: _test\.go
+        linters:
+          - funlen
+          - gocyclo
+          - gocognit
+          - wrapcheck
+          - errcheck
+
+      # Exclude main packages from some checks
+      - path: cmd/
+        linters:
+          - wrapcheck
+
+      # Allow dot imports in tests for testify
+      - path: _test\.go
+        text: "dot-imports"
+
+output:
+  formats:
+    text:
+      print-issued-lines: true
+      print-linter-name: true
+  sort-order:
+    - file
+    - linter

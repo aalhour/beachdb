@@ -1,4 +1,4 @@
-.PHONY: all build test clean help
+.PHONY: all build test coverage lint fmt clean help
 
 # Default target
 all: build
@@ -16,9 +16,26 @@ build:
 test:
 	go test ./...
 
-## clean: Remove build artifacts
+## coverage: Run tests with coverage report
+coverage:
+	go test -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report: coverage.html"
+
+## lint: Run golangci-lint
+lint:
+	golangci-lint run ./...
+
+## fmt: Format code using golangci-lint formatters
+fmt:
+	golangci-lint fmt ./...
+
+## clean: Remove build artifacts and test output
 clean:
 	rm -rf bin/
+	rm -f coverage.out coverage.html
+	rm -f *.test *.out *.prof
+	rm -rf cpu.prof mem.prof
 
 ## help: Show this help message
 help:
