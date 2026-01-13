@@ -17,6 +17,7 @@ linters:
     - modernize       # Suggests modern Go idioms (slices.Contains, etc.)
     - usestdlibvars   # Detect cases where stdlib vars should be used
     - perfsprint      # Use strconv instead of fmt.Sprintf where possible
+    - staticcheck     # Static code analysis linter
 
     # ─────────────────────────────────────────────────────────────────────────
     # Code complexity

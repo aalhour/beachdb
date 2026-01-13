@@ -84,7 +84,6 @@ func TestBatchReset(t *testing.T) {
 		name       string
 		putData    []map[string]string
 		deleteData []string
-		wantCount  int
 	}{
 		{
 			name:       "empty",
@@ -117,8 +116,8 @@ func TestBatchReset(t *testing.T) {
 
 			if batch.Count() != 0 {
 				t.Errorf(
-					"Expected count to be %v, but got %v instead",
-					test.wantCount, batch.Count(),
+					"Expected count to be 0, but got %v instead",
+					batch.Count(),
 				)
 			}
 		})
@@ -138,6 +137,23 @@ func TestBatchEncode(t *testing.T) {
 				1,       // version
 				0, 0, 0, // reserved (3 bytes)
 				0, 0, 0, 0, // op_count = 0
+			},
+		},
+		{
+			name: "empty key and value",
+			batch: &Batch{ops: []operation{{
+				opType: OpTypePut,
+				key:    []byte{},
+				value:  []byte{},
+			}}},
+			want: []byte{
+				1,       // version
+				0, 0, 0, // reserved (3 bytes)
+				0, 0, 0, 1, // op_count = 1
+				// ---
+				1,          // op_type = Put
+				0, 0, 0, 0, // key_len = 0
+				0, 0, 0, 0, // value_len = 0
 			},
 		},
 		{
@@ -395,36 +411,40 @@ func TestBatchDecode(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			batch, err := DecodeBatch(tc.input)
-			if tc.wantErr {
-				if err == nil {
-					t.Errorf("expected error but got none (batch = %+v)", batch)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			batch, err := DecodeBatch(test.input)
+			if !test.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			} else if test.wantErr && err == nil {
+				t.Errorf("expected error but got none (batch = %+v)", batch)
+			}
+
+			if test.wantOps == nil {
+				return
+			}
+
+			// Compare batch.ops and tc.wantOps
+			if len(batch.ops) != len(test.wantOps) {
+				t.Fatalf(
+					"expected %d ops, got %d",
+					len(test.wantOps), len(batch.ops),
+				)
+			}
+
+			for i := range test.wantOps {
+				got, want := batch.ops[i], test.wantOps[i]
+				if got.opType != want.opType {
+					t.Errorf("op %d: expected opType %v, got %v", i, want.opType, got.opType)
 				}
-			} else {
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
-				} else if tc.wantOps != nil {
-					// Compare batch.ops and tc.wantOps
-					if len(batch.ops) != len(tc.wantOps) {
-						t.Fatalf("expected %d ops, got %d", len(tc.wantOps), len(batch.ops))
-					}
-					for i := range tc.wantOps {
-						got, want := batch.ops[i], tc.wantOps[i]
-						if got.opType != want.opType {
-							t.Errorf("op %d: expected opType %v, got %v", i, want.opType, got.opType)
-						}
-						if string(got.key) != string(want.key) {
-							t.Errorf("op %d: expected key %q, got %q", i, want.key, got.key)
-						}
-						if want.value == nil && got.value != nil {
-							t.Errorf("op %d: expected nil value, got %v", i, got.value)
-						}
-						if want.value != nil && string(got.value) != string(want.value) {
-							t.Errorf("op %d: expected value %q, got %q", i, want.value, got.value)
-						}
-					}
+				if string(got.key) != string(want.key) {
+					t.Errorf("op %d: expected key %q, got %q", i, want.key, got.key)
+				}
+				if want.value == nil && got.value != nil {
+					t.Errorf("op %d: expected nil value, got %v", i, got.value)
+				}
+				if want.value != nil && string(got.value) != string(want.value) {
+					t.Errorf("op %d: expected value %q, got %q", i, want.value, got.value)
 				}
 			}
 		})
@@ -446,6 +466,29 @@ func TestBatchEncodeDecodeRoundtrip(t *testing.T) {
 				op         string
 				key, value []byte
 			}{},
+		},
+		{
+			name: "Empty key and value",
+			ops: []struct {
+				op    string
+				key   []byte
+				value []byte
+			}{
+				{"put", []byte{}, []byte{}},
+				{"del", []byte{}, nil},
+			},
+		},
+		{
+			name: "Binary data with null bytes",
+			ops: []struct {
+				op    string
+				key   []byte
+				value []byte
+			}{
+				{"put", []byte{0x00, 0x01, 0x02}, []byte{0xFF, 0x00, 0xFE}},
+				{"put", []byte{0x00, 0x00, 0x00}, []byte{0x00}},
+				{"del", []byte{0x00}, nil},
+			},
 		},
 		{
 			name: "Put and Delete, two ops",
@@ -511,4 +554,11 @@ func TestBatchEncodeDecodeRoundtrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+func FuzzDecodeBatch(f *testing.F) {
+	f.Add([]byte{1, 0, 0, 0, 0, 0, 0, 0})
+	f.Fuzz(func(_ *testing.T, data []byte) {
+		DecodeBatch(data) // should never panic!
+	})
 }

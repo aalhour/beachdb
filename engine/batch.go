@@ -1,3 +1,4 @@
+// Package engine implements the public storage engine API
 package engine
 
 /*
@@ -34,12 +35,16 @@ import (
 	"github.com/aalhour/beachdb/internal/util/coding"
 )
 
+// OpType represents the type of operation in a batch (Put or Delete).
 type OpType byte
 
+// EncodingVersion is the current batch encoding format version.
+const EncodingVersion byte = 0x01 // v1
+
+// Operation Types
 const (
-	EncodingVersion uint32 = 1
-	OpTypePut       OpType = 1
-	OpTypeDelete    OpType = 2
+	OpTypePut OpType = iota + 1
+	OpTypeDelete
 )
 
 type operation struct {
@@ -48,11 +53,13 @@ type operation struct {
 	value  []byte
 }
 
+// Batch holds a sequence of Put and Delete operations to be applied atomically.
 type Batch struct {
 	mu  sync.RWMutex
 	ops []operation
 }
 
+// NewBatch creates an empty Batch ready for Put and Delete operations.
 func NewBatch() *Batch {
 	return &Batch{
 		ops: make([]operation, 0, 10),
@@ -130,19 +137,19 @@ func (b *Batch) Encode() []byte {
 	buf := make([]byte, size)
 
 	// Write the header
-	buf[0] = byte(EncodingVersion)                // version, e.g.: 0x01
+	buf[0] = EncodingVersion                      // version, e.g.: 0x01
 	buf[1], buf[2], buf[3] = 0, 0, 0              // reserved
-	coding.PutUint32(buf[4:], uint32(len(b.ops))) // op_count
+	coding.PutUint32(buf[4:], uint32(len(b.ops))) //nolint:gosec // batch size is bounded
 
-	// Wrrite each op
+	// Write each op
 	offset := 8
 	for _, op := range b.ops {
 		// Write the op type and increment offset (1 byte)
 		buf[offset] = byte(op.opType)
-		offset += 1
+		offset++
 
 		// Write the key length (4 bytes)
-		coding.PutUint32(buf[offset:], uint32(len(op.key)))
+		coding.PutUint32(buf[offset:], uint32(len(op.key))) //nolint:gosec // key size is bounded
 		offset += 4
 
 		// Write the key (variable)
@@ -152,7 +159,7 @@ func (b *Batch) Encode() []byte {
 		// Write the value, if the op is a Put
 		if op.opType == OpTypePut {
 			// Write the value length (4 bytes)
-			coding.PutUint32(buf[offset:], uint32(len(op.value)))
+			coding.PutUint32(buf[offset:], uint32(len(op.value))) //nolint:gosec // value size is bounded
 			offset += 4
 
 			// Write the value (variable)
@@ -171,8 +178,10 @@ func DecodeBatch(data []byte) (*Batch, error) {
 
 	// Read header
 	version, err := r.ReadByte()
-	if err != nil || version != byte(EncodingVersion) {
+	if err != nil {
 		return nil, ErrCorruptBatch
+	} else if version != EncodingVersion {
+		return nil, ErrBadVersion
 	}
 
 	// Skip reserved bytes
@@ -189,49 +198,61 @@ func DecodeBatch(data []byte) (*Batch, error) {
 	batch := NewBatch()
 
 	for range opCount {
-		opTypeByte, err := r.ReadByte()
+		op, err := decodeOperation(r)
 		if err != nil {
-			return nil, ErrCorruptBatch
+			return nil, err
 		}
-
-		var opType OpType
-		switch opTypeByte {
-		case byte(OpTypePut):
-			opType = OpTypePut
-		case byte(OpTypeDelete):
-			opType = OpTypeDelete
-		default:
-			return nil, ErrCorruptBatch
-		}
-
-		keyLen, err := r.ReadUint32()
-		if err != nil {
-			return nil, ErrCorruptBatch
-		}
-
-		key, err := r.ReadBytes(int(keyLen))
-		if err != nil {
-			return nil, ErrCorruptBatch
-		}
-
-		var value []byte
-		if opType == OpTypePut {
-			valueLen, err := r.ReadUint32()
-			if err != nil {
-				return nil, ErrCorruptBatch
-			}
-			value, err = r.ReadBytes(int(valueLen))
-			if err != nil {
-				return nil, ErrCorruptBatch
-			}
-		}
-
-		batch.ops = append(batch.ops, operation{
-			opType: opType,
-			key:    key,
-			value:  value,
-		})
+		batch.ops = append(batch.ops, *op)
 	}
 
 	return batch, nil
+}
+
+func decodeOperation(reader *coding.ByteReader) (*operation, error) {
+	opTypeByte, err := reader.ReadByte()
+	if err != nil {
+		return nil, ErrCorruptBatch
+	}
+
+	var opType OpType
+	switch opTypeByte {
+	case byte(OpTypePut):
+		opType = OpTypePut
+	case byte(OpTypeDelete):
+		opType = OpTypeDelete
+	default:
+		return nil, ErrUnknownOpType
+	}
+
+	keyLen, err := reader.ReadUint32()
+	if err != nil {
+		return nil, ErrTruncatedBatch
+	}
+
+	key := make([]byte, keyLen)
+	keyBytes, err := reader.ReadBytes(int(keyLen))
+	if err != nil {
+		return nil, ErrTruncatedBatch
+	}
+	copy(key, keyBytes)
+
+	var value []byte
+	if opType == OpTypePut {
+		valueLen, err := reader.ReadUint32()
+		if err != nil {
+			return nil, ErrTruncatedBatch
+		}
+		valueBytes, err := reader.ReadBytes(int(valueLen))
+		if err != nil {
+			return nil, ErrTruncatedBatch
+		}
+		value = make([]byte, valueLen)
+		copy(value, valueBytes)
+	}
+
+	return &operation{
+		opType: opType,
+		key:    key,
+		value:  value,
+	}, nil
 }
