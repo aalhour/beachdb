@@ -30,6 +30,9 @@ lint:
 fmt:
 	golangci-lint fmt ./...
 
+## check: Runs fmt, lint and test
+check: fmt lint test
+
 ## clean: Remove build artifacts and test output
 clean:
 	rm -rf bin/
