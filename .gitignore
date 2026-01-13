@@ -24,3 +24,6 @@ profile.cov
 
 # Internal stuff
 docs-internal/
+
+# Scratchpad
+./main.go
