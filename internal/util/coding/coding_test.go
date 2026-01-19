@@ -6,6 +6,28 @@ import (
 	"testing"
 )
 
+func TestPutUint16AndUint16(t *testing.T) {
+	tests := []struct {
+		name string
+		val  uint16
+	}{
+		{"zero", 0},
+		{"one", 1},
+		{"max uint16", 0xFFFF},
+		{"arbitrary", 0x1234},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := make([]byte, 2)
+			PutUint16(buf, tt.val)
+			got := Uint16(buf)
+			if got != tt.val {
+				t.Errorf("Uint16(PutUint16(%d)) = %d; want %d", tt.val, got, tt.val)
+			}
+		})
+	}
+}
+
 func TestPutUint32AndUint32(t *testing.T) {
 	tests := []struct {
 		name string
@@ -47,6 +69,22 @@ func TestPutUint64AndUint64(t *testing.T) {
 				t.Errorf("Uint64(PutUint64(%d)) = %d; want %d", tt.val, got, tt.val)
 			}
 		})
+	}
+}
+
+func TestUint16Endian(t *testing.T) {
+	// Check that the encoding is big endian
+	buf := []byte{0x01, 0x23}
+	want := uint16(0x0123)
+	got := Uint16(buf)
+	if got != want {
+		t.Errorf("Uint16(%x) = %x; want %x", buf, got, want)
+	}
+	// Round-trip test
+	out := make([]byte, 2)
+	PutUint16(out, want)
+	if !bytes.Equal(out, buf) {
+		t.Errorf("PutUint16(%x) = %x; want %x", want, out, buf)
 	}
 }
 
@@ -198,7 +236,6 @@ func Test_ByteReader_ReadBytes(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func Test_ByteReader_ReadUint32(t *testing.T) {

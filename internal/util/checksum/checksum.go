@@ -1,3 +1,4 @@
+// Package checksum provides CRC32C checksum utilities for data integrity verification.
 package checksum
 
 import (

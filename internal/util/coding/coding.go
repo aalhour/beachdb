@@ -1,3 +1,4 @@
+// Package coding provides utilities for encoding and decoding binary data.
 package coding
 
 import (
@@ -50,6 +51,16 @@ func (r *ByteReader) ReadBytes(n int) ([]byte, error) {
 	b := r.data[r.offset : r.offset+n]
 	r.offset += n
 	return b, nil
+}
+
+// PutUint16 stores v into dst[0:2]
+func PutUint16(dst []byte, v uint16) {
+	binary.BigEndian.PutUint16(dst, v)
+}
+
+// Uint16 returns the uint16 representation of src[0:2]
+func Uint16(src []byte) uint16 {
+	return binary.BigEndian.Uint16(src)
 }
 
 // PutUint32 stores v into dst[0:4]
