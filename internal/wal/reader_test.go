@@ -759,6 +759,46 @@ func TestReader_Next_EdgeCases(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("concurrent Next calls are safe", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "concurrent_next.wal")
+
+		// Write multiple records
+		w, _ := NewWriter(path)
+		for range 10 {
+			w.Append([]byte("record"))
+		}
+		w.Close()
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		// Read concurrently - mutex should protect
+		done := make(chan []byte, 10)
+		for range 10 {
+			go func() {
+				payload, err := r.Next()
+				if err == nil {
+					done <- payload
+				} else {
+					done <- nil
+				}
+			}()
+		}
+
+		// Collect all results
+		var successCount int
+		for range 10 {
+			if <-done != nil {
+				successCount++
+			}
+		}
+
+		// All 10 reads should succeed (mutex serializes them)
+		if successCount != 10 {
+			t.Errorf("expected 10 successful reads, got %d", successCount)
+		}
+	})
 }
 
 func TestReader_Next_ManualRecordConstruction(t *testing.T) {
@@ -852,4 +892,23 @@ func TestReader_Next_ManualRecordConstruction(t *testing.T) {
 			t.Errorf("got %q, want %q", got, payload)
 		}
 	})
+}
+
+// ExampleReader demonstrates basic WAL reader usage.
+func ExampleReader() {
+	path := "/tmp/example.wal"
+	r, err := NewReader(path)
+	if err != nil {
+		return
+	}
+	defer r.Close()
+
+	for {
+		payload, err := r.Next()
+		if err != nil {
+			break
+		}
+		_ = payload
+	}
+	// Output:
 }

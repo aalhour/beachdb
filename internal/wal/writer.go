@@ -33,10 +33,10 @@ func NewWriter(path string) (*Writer, error) {
 
 // Append writes a new WAL record containing the given payload.
 func (w *Writer) Append(payload []byte) error {
-	// First, encode the payload
+	// First, encode the payload outside the lock
 	record := EncodeRecord(payload)
 
-	// Acquire the lock to synchronize buffer writing
+	// Second, acquire the lock to synchronize buffer writing
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -44,10 +44,12 @@ func (w *Writer) Append(payload []byte) error {
 		return ErrWriterClosed
 	}
 
+	// Write to the buffer inside the lock
 	_, err := w.buf.Write(record)
 	if err != nil {
 		return fmt.Errorf("wal: failed to write record: %w", err)
 	}
+
 	return nil
 }
 
@@ -89,16 +91,16 @@ func (w *Writer) Close() error {
 
 	if w.buf != nil {
 		if err := w.buf.Flush(); err != nil {
-			firstErr = fmt.Errorf("wal: failed to flush buffer: %w", err)
+			firstErr = fmt.Errorf("wal: flush buffer failed during close: %w", err)
 		}
 	}
 
 	if err := w.file.Sync(); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("wal: failed to sync file: %w", err)
+		firstErr = fmt.Errorf("wal: sync file failed during close: %w", err)
 	}
 
 	if err := w.file.Close(); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("wal: failed to close file: %w", err)
+		firstErr = fmt.Errorf("wal: close file failed: %w", err)
 	}
 
 	// Mark as closed even if there was an error

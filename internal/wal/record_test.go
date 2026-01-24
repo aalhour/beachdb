@@ -293,17 +293,17 @@ func TestDecodeRecordHeader(t *testing.T) {
 			wantErr:        ErrUnsupportedRecordType,
 		},
 		{
-			name: "header with extra trailing bytes is valid",
+			name: "header with extra trailing bytes returns ErrBadHeader",
 			header: []byte{
 				0xBE, 0xAC,
 				0x01, 0x01,
 				0, 0, 0, 10,
 				0xAB, 0xCD, 0xEF, 0x12,
-				0xFF, 0xFF, 0xFF, // extra bytes (payload data)
+				0xFF, 0xFF, 0xFF, // extra bytes (invalid - header must be exactly 12 bytes)
 			},
-			wantPayloadLen: 10,
-			wantChecksum:   0xABCDEF12,
-			wantErr:        nil,
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        ErrBadHeader,
 		},
 	}
 
@@ -553,4 +553,30 @@ func FuzzDecodeRecordHeader(f *testing.F) {
 		// Just ensure it doesn't panic
 		_, _, _ = DecodeRecordHeader(header)
 	})
+}
+
+// ExampleEncodeRecord demonstrates encoding a WAL record.
+func ExampleEncodeRecord() {
+	payload := []byte("hello, world")
+	record := EncodeRecord(payload)
+	_ = record
+	// Output:
+}
+
+// ExampleDecodeRecordHeader demonstrates decoding a WAL record header.
+func ExampleDecodeRecordHeader() {
+	// Create a valid header
+	header := make([]byte, recordHeaderSize)
+	coding.PutUint16(header[0:], walMagic)
+	header[2] = walVersion
+	header[3] = RecordTypeFull
+	coding.PutUint32(header[4:], 5)          // payload length = 5
+	coding.PutUint32(header[8:], 0x12345678) // checksum
+
+	payloadLen, checksum, err := DecodeRecordHeader(header)
+	if err != nil {
+		return
+	}
+	_, _ = payloadLen, checksum
+	// Output:
 }

@@ -6,15 +6,22 @@ import (
 )
 
 const (
-	walMagic         = 0xBEAC // BEACH truncated ;)
-	walVersion       = 0x01   // v1
+	// walMagic is the magic number identifying BeachDB WAL records.
+	// Value: 0xBEAC (big-endian: 0xBE 0xAC, "BEach" truncated).
+	walMagic = 0xBEAC
+
+	// walVersion is the current WAL format version.
+	walVersion = 0x01 // v1
+
+	// recordHeaderSize is the size of a WAL record header in bytes.
 	recordHeaderSize = 12
 
 	// RecordTypeFull indicates a complete record.
 	RecordTypeFull byte = 0x01
 )
 
-// EncodeRecord takes a payload and returns an encoded WAL record
+// EncodeRecord encodes a payload into a WAL record.
+// The payload can be nil or empty; both are valid.
 func EncodeRecord(payload []byte) []byte {
 	totalSize := recordHeaderSize + len(payload)
 	buffer := make([]byte, totalSize)
@@ -36,10 +43,12 @@ func EncodeRecord(payload []byte) []byte {
 	return buffer
 }
 
-// DecodeRecordHeader returns verifies a record header and returns checksum and payload's length
+// DecodeRecordHeader verifies a record header and returns the payload length and checksum.
 func DecodeRecordHeader(header []byte) (payloadLen uint32, checksum uint32, err error) {
 	if len(header) < recordHeaderSize {
 		return 0, 0, ErrTruncated
+	} else if len(header) > recordHeaderSize {
+		return 0, 0, ErrBadHeader
 	}
 
 	magic := coding.Uint16(header[0:2])
@@ -63,7 +72,7 @@ func DecodeRecordHeader(header []byte) (payloadLen uint32, checksum uint32, err 
 	return payloadLen, checksum, nil
 }
 
-// ValidateRecord verifies the checksum given a payload with expected checksum
+// ValidateRecord verifies that the payload's checksum matches the expected checksum.
 func ValidateRecord(payload []byte, expectedChecksum uint32) error {
 	gotChecksum := checksum.CRC32C(payload)
 	if gotChecksum != expectedChecksum {

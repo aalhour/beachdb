@@ -4,8 +4,12 @@ package wal
 import "errors"
 
 var (
-	// ErrCorruptRecord indicates when a record is corrupt
+	// ErrCorruptRecord indicates when a record is corrupt.
 	ErrCorruptRecord = errors.New("wal: corrupt record")
+
+	// ErrBadHeader indicates when the header has an invalid length.
+	// This occurs when len(header) != recordHeaderSize (12 bytes).
+	ErrBadHeader = errors.New("wal: invalid header length")
 
 	// ErrChecksum indicates that a checksum is not matched.
 	ErrChecksum = errors.New("wal: checksum mismatch")

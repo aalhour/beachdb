@@ -30,6 +30,7 @@ package engine
 */
 
 import (
+	"math"
 	"sync"
 
 	"github.com/aalhour/beachdb/internal/util/coding"
@@ -66,7 +67,8 @@ func NewBatch() *Batch {
 	}
 }
 
-// Put appends a put op to the batch
+// Put appends a put operation to the batch.
+// Empty keys and values are allowed.
 func (b *Batch) Put(key, value []byte) {
 	// Copy the key and value first
 	keyCopy := append([]byte(nil), key...)
@@ -84,7 +86,8 @@ func (b *Batch) Put(key, value []byte) {
 	})
 }
 
-// Delete appends a delete op to the batch
+// Delete appends a delete operation to the batch.
+// Empty keys are allowed.
 func (b *Batch) Delete(key []byte) {
 	// Copy the key slice first
 	keyCopy := append([]byte(nil), key...)
@@ -100,7 +103,7 @@ func (b *Batch) Delete(key []byte) {
 	})
 }
 
-// Count returns the number of ops in the batch
+// Count returns the number of operations in the batch.
 func (b *Batch) Count() int {
 	// Hold a read lock
 	b.mu.RLock()
@@ -109,16 +112,19 @@ func (b *Batch) Count() int {
 	return len(b.ops)
 }
 
-// Reset clears the internal state of the Batch
+// Reset clears the internal state of the Batch.
+// It reuses the underlying slice capacity to reduce allocations.
 func (b *Batch) Reset() {
 	// Hold the lock
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.ops = make([]operation, 0, 10)
+	// Clear but reuse capacity
+	b.ops = b.ops[:0]
 }
 
-// Encode serializes operations to a byte array
+// Encode serializes the batch operations to a byte slice.
+// The encoding is deterministic: the same batch always produces the same bytes.
 func (b *Batch) Encode() []byte {
 	// Grab a read lock
 	b.mu.RLock()
@@ -137,9 +143,13 @@ func (b *Batch) Encode() []byte {
 	buf := make([]byte, size)
 
 	// Write the header
-	buf[0] = EncodingVersion                      // version, e.g.: 0x01
-	buf[1], buf[2], buf[3] = 0, 0, 0              // reserved
-	coding.PutUint32(buf[4:], uint32(len(b.ops))) //nolint:gosec // batch size is bounded
+	buf[0] = EncodingVersion         // version, e.g.: 0x01
+	buf[1], buf[2], buf[3] = 0, 0, 0 // reserved
+	if len(b.ops) > math.MaxUint32 {
+		panic("batch: too many operations")
+	}
+	//nolint:gosec // G115: len(b.ops) is validated above, overflow not possible
+	coding.PutUint32(buf[4:], uint32(len(b.ops)))
 
 	// Write each op
 	offset := 8
@@ -172,7 +182,8 @@ func (b *Batch) Encode() []byte {
 	return buf
 }
 
-// DecodeBatch takes a byte array and tries to decode it to a Batch struct
+// DecodeBatch decodes a byte slice into a Batch.
+// Returns an error if the data is malformed, truncated, or contains invalid operations.
 func DecodeBatch(data []byte) (*Batch, error) {
 	r := coding.NewByteReader(data)
 
@@ -229,11 +240,12 @@ func decodeOperation(reader *coding.ByteReader) (*operation, error) {
 		return nil, ErrTruncatedBatch
 	}
 
-	key := make([]byte, keyLen)
 	keyBytes, err := reader.ReadBytes(int(keyLen))
 	if err != nil {
 		return nil, ErrTruncatedBatch
 	}
+	// Copy the key, because ReadBytes returns a slice view
+	key := make([]byte, keyLen)
 	copy(key, keyBytes)
 
 	var value []byte
@@ -246,6 +258,7 @@ func decodeOperation(reader *coding.ByteReader) (*operation, error) {
 		if err != nil {
 			return nil, ErrTruncatedBatch
 		}
+		// Copy the value, because ReadBytes returns a slice view
 		value = make([]byte, valueLen)
 		copy(value, valueBytes)
 	}

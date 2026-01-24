@@ -562,3 +562,30 @@ func FuzzDecodeBatch(f *testing.F) {
 		DecodeBatch(data) // should never panic!
 	})
 }
+
+// ExampleBatch demonstrates basic batch operations.
+func ExampleBatch() {
+	batch := NewBatch()
+	batch.Put([]byte("name"), []byte("alice"))
+	batch.Put([]byte("age"), []byte("30"))
+	batch.Delete([]byte("temp"))
+
+	encoded := batch.Encode()
+	_ = encoded
+	// Output:
+}
+
+// ExampleDecodeBatch demonstrates decoding a batch.
+func ExampleDecodeBatch() {
+	// Create a simple encoded batch
+	batch := NewBatch()
+	batch.Put([]byte("key"), []byte("value"))
+	encoded := batch.Encode()
+
+	decoded, err := DecodeBatch(encoded)
+	if err != nil {
+		return
+	}
+	_ = decoded
+	// Output:
+}

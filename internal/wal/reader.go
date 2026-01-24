@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -42,10 +43,19 @@ func (r *Reader) Next() (payload []byte, err error) {
 	}
 
 	header := make([]byte, recordHeaderSize)
-	_, err = io.ReadFull(r.buf, header)
+	n, err := io.ReadFull(r.buf, header)
 
-	// err could be io.EOF, io.ErrShortBuffer or io.ErrUnexpectedEOF
+	// Handle EOF and truncation cases
+	if errors.Is(err, io.EOF) {
+		// Clean EOF: no more records
+		return nil, io.EOF
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || n < recordHeaderSize {
+		// Partial read: truncated header
+		return nil, ErrTruncated
+	}
 	if err != nil {
+		// Other I/O error
 		return nil, fmt.Errorf("wal: failed to read header: %w", err)
 	}
 
@@ -57,9 +67,14 @@ func (r *Reader) Next() (payload []byte, err error) {
 
 	// Read N=payloadLen in bytes from the file
 	payload = make([]byte, payloadLen)
-	_, err = io.ReadFull(r.buf, payload)
-	if err != nil {
+	n, err = io.ReadFull(r.buf, payload)
+	if errors.Is(err, io.ErrUnexpectedEOF) || n < int(payloadLen) {
+		// Partial read: truncated payload
 		return nil, ErrTruncated
+	}
+	if err != nil {
+		// Other I/O error (unlikely for ReadFull, but handle it)
+		return nil, fmt.Errorf("wal: failed to read payload: %w", err)
 	}
 
 	// Validate the payload's checksum

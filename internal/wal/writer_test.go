@@ -102,6 +102,35 @@ func TestWriter_Append(t *testing.T) {
 		}
 	})
 
+	t.Run("handles nil payload", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "append.wal")
+
+		w, err := NewWriter(path)
+		if err != nil {
+			t.Fatalf("NewWriter failed: %v", err)
+		}
+
+		err = w.Append(nil)
+		if err != nil {
+			t.Fatalf("Append failed: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+
+		// Verify file has content
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("failed to stat file: %v", err)
+		}
+
+		// expectedSize is the same as the record header size because nil = nothing!
+		expectedSize := int64(recordHeaderSize)
+		if info.Size() != expectedSize {
+			t.Errorf("file size = %d, want %d", info.Size(), expectedSize)
+		}
+	})
+
 	t.Run("appends multiple records", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "multi.wal")
 
@@ -847,4 +876,18 @@ func TestWriter_Close_NoPanic(t *testing.T) {
 		// Close immediately without any operations
 		_ = w.Close()
 	})
+}
+
+// ExampleWriter demonstrates basic WAL writer usage.
+func ExampleWriter() {
+	path := "/tmp/example.wal"
+	w, err := NewWriter(path)
+	if err != nil {
+		return
+	}
+	defer w.Close()
+
+	w.Append([]byte("payload"))
+	w.Sync()
+	// Output:
 }

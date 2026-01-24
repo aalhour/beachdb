@@ -44,6 +44,8 @@ func (r *ByteReader) ReadUint32() (uint32, error) {
 }
 
 // ReadBytes reads exactly n bytes.
+// Returns a slice view of the underlying data. Callers should copy the result
+// if they need to retain the data beyond the lifetime of the ByteReader.
 func (r *ByteReader) ReadBytes(n int) ([]byte, error) {
 	if r.offset+n > len(r.data) {
 		return nil, io.ErrUnexpectedEOF
@@ -53,32 +55,38 @@ func (r *ByteReader) ReadBytes(n int) ([]byte, error) {
 	return b, nil
 }
 
-// PutUint16 stores v into dst[0:2]
+// PutUint16 stores v into dst[0:2] in big-endian byte order.
+// dst must have length >= 2, otherwise it panics.
 func PutUint16(dst []byte, v uint16) {
 	binary.BigEndian.PutUint16(dst, v)
 }
 
-// Uint16 returns the uint16 representation of src[0:2]
+// Uint16 returns the uint16 value from src[0:2] in big-endian byte order.
+// src must have length >= 2, otherwise it panics.
 func Uint16(src []byte) uint16 {
 	return binary.BigEndian.Uint16(src)
 }
 
-// PutUint32 stores v into dst[0:4]
+// PutUint32 stores v into dst[0:4] in big-endian byte order.
+// dst must have length >= 4, otherwise it panics.
 func PutUint32(dst []byte, v uint32) {
 	binary.BigEndian.PutUint32(dst, v)
 }
 
-// Uint32 returns the uint32 representation of src[0:4]
+// Uint32 returns the uint32 value from src[0:4] in big-endian byte order.
+// src must have length >= 4, otherwise it panics.
 func Uint32(src []byte) uint32 {
 	return binary.BigEndian.Uint32(src)
 }
 
-// PutUint64 stores v into dst[0:8]
+// PutUint64 stores v into dst[0:8] in big-endian byte order.
+// dst must have length >= 8, otherwise it panics.
 func PutUint64(dst []byte, v uint64) {
 	binary.BigEndian.PutUint64(dst, v)
 }
 
-// Uint64 returns the uint64 representation of src[0:8]
+// Uint64 returns the uint64 value from src[0:8] in big-endian byte order.
+// src must have length >= 8, otherwise it panics.
 func Uint64(src []byte) uint64 {
 	return binary.BigEndian.Uint64(src)
 }
