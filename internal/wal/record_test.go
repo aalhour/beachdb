@@ -8,51 +8,17 @@ import (
 	"github.com/aalhour/beachdb/internal/util/coding"
 )
 
-func TestChecksumUniqueness(t *testing.T) {
-	payload1 := []byte{0x01, 0x02, 0x03}
-	payload2 := []byte{0x01, 0x02, 0x04}
-
-	record1 := EncodeRecord(payload1)
-	record2 := EncodeRecord(payload2)
-
-	checksum1 := coding.Uint32(record1[8:12])
-	checksum2 := coding.Uint32(record2[8:12])
-
-	if checksum1 == checksum2 {
-		t.Errorf("Different payloads should produce different checksums")
-	}
-}
-
-func TestPayloadImmutability(t *testing.T) {
-	payload := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
-	payloadCopy := make([]byte, len(payload))
-	copy(payloadCopy, payload)
-
-	_ = EncodeRecord(payload)
-
-	if !bytes.Equal(payload, payloadCopy) {
-		t.Errorf("EncodeRecord should not modify the input payload")
-	}
-}
-
-func TestHeaderConsistency(t *testing.T) {
-	// Ensure that records with the same payload always produce the same encoding
-	payload := []byte{0x01, 0x02, 0x03}
-
-	record1 := EncodeRecord(payload)
-	record2 := EncodeRecord(payload)
-
-	if !bytes.Equal(record1, record2) {
-		t.Errorf("Encoding the same payload twice should produce identical results")
-	}
-}
-
 func TestEncodeRecord(t *testing.T) {
 	tests := []struct {
 		name       string
 		payload    []byte
 		wantLength int
 	}{
+		{
+			name:       "nil payload produces 12 bytes",
+			payload:    nil,
+			wantLength: 12,
+		},
 		{
 			name:       "empty payload produces 12 bytes",
 			payload:    []byte{},
@@ -90,65 +56,460 @@ func TestEncodeRecord(t *testing.T) {
 		},
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got := EncodeRecord(test.payload)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EncodeRecord(tt.payload)
 
-			if len(got) != test.wantLength {
-				t.Errorf(
-					"Wanted encoded length of %v but got %v instead",
-					test.wantLength, len(got),
-				)
+			if len(got) != tt.wantLength {
+				t.Errorf("length = %d, want %d", len(got), tt.wantLength)
 			}
 
-			// Check the magic
-			if got[0] != 0xBE || got[1] != 0xAC {
-				t.Errorf(
-					"Expected magic at [0:2] but got %v instead",
-					got[0:2],
-				)
+			// Check magic using constant
+			gotMagic := coding.Uint16(got[0:2])
+			if gotMagic != walMagic {
+				t.Errorf("magic = 0x%X, want 0x%X", gotMagic, walMagic)
 			}
 
-			// Check the version
+			// Check version
 			if got[2] != walVersion {
-				t.Errorf(
-					"Expected version at [2] but got %v instead",
-					got[2],
-				)
+				t.Errorf("version = %d, want %d", got[2], walVersion)
 			}
 
-			// Check the record type
+			// Check record type
 			if got[3] != RecordTypeFull {
-				t.Errorf(
-					"Expected RecordTypeFull at [3] but got %v instead",
-					got[3],
-				)
+				t.Errorf("recordType = %d, want %d", got[3], RecordTypeFull)
 			}
 
-			// Check the payload length field
-			if coding.Uint32(got[4:8]) != uint32(len(test.payload)) {
-				t.Errorf(
-					"Expected payload length of %v at [4:8] but got %v instead",
-					len(test.payload), got[4:8],
-				)
+			// Check payload length field
+			gotPayloadLen := coding.Uint32(got[4:8])
+			if gotPayloadLen != uint32(len(tt.payload)) {
+				t.Errorf("payloadLen = %d, want %d", gotPayloadLen, len(tt.payload))
 			}
 
-			// Check the checksum
-			wantCRC32C := checksum.CRC32C(test.payload)
-			if coding.Uint32(got[8:12]) != wantCRC32C {
-				t.Errorf(
-					"Expected checksum '%v' at [8:12] but got %v instead",
-					wantCRC32C, got[8:12],
-				)
+			// Check checksum
+			wantCRC := checksum.CRC32C(tt.payload)
+			gotCRC := coding.Uint32(got[8:12])
+			if gotCRC != wantCRC {
+				t.Errorf("checksum = 0x%X, want 0x%X", gotCRC, wantCRC)
 			}
 
 			// Check payload is preserved correctly
-			if !bytes.Equal(got[12:], test.payload) {
-				t.Errorf(
-					"Expected payload to be preserved, but got %v instead",
-					got[12:],
-				)
+			if !bytes.Equal(got[12:], tt.payload) {
+				t.Errorf("payload not preserved correctly")
 			}
 		})
 	}
+}
+
+func TestEncodeRecordProperties(t *testing.T) {
+	t.Run("checksum uniqueness", func(t *testing.T) {
+		payload1 := []byte{0x01, 0x02, 0x03}
+		payload2 := []byte{0x01, 0x02, 0x04}
+
+		record1 := EncodeRecord(payload1)
+		record2 := EncodeRecord(payload2)
+
+		checksum1 := coding.Uint32(record1[8:12])
+		checksum2 := coding.Uint32(record2[8:12])
+
+		if checksum1 == checksum2 {
+			t.Error("different payloads should produce different checksums")
+		}
+	})
+
+	t.Run("payload immutability", func(t *testing.T) {
+		payload := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
+		payloadCopy := make([]byte, len(payload))
+		copy(payloadCopy, payload)
+
+		_ = EncodeRecord(payload)
+
+		if !bytes.Equal(payload, payloadCopy) {
+			t.Error("EncodeRecord should not modify the input payload")
+		}
+	})
+
+	t.Run("deterministic encoding", func(t *testing.T) {
+		payload := []byte{0x01, 0x02, 0x03}
+
+		record1 := EncodeRecord(payload)
+		record2 := EncodeRecord(payload)
+
+		if !bytes.Equal(record1, record2) {
+			t.Error("encoding the same payload twice should produce identical results")
+		}
+	})
+}
+
+func TestDecodeRecordHeader(t *testing.T) {
+	tests := []struct {
+		name           string
+		header         []byte
+		wantPayloadLen uint32
+		wantChecksum   uint32
+		wantErr        error
+	}{
+		{
+			name: "valid header with zero-length payload",
+			header: []byte{
+				0xBE, 0xAC, // magic
+				0x01,       // version
+				0x01,       // record type (Full)
+				0, 0, 0, 0, // payload length = 0
+				0, 0, 0, 0, // checksum = 0
+			},
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        nil,
+		},
+		{
+			name: "valid header with non-zero payload length and checksum",
+			header: []byte{
+				0xBE, 0xAC, // magic
+				0x01,             // version
+				0x01,             // record type (Full)
+				0, 0, 0x01, 0x00, // payload length = 256 (big endian)
+				0xDE, 0xAD, 0xBE, 0xEF, // checksum
+			},
+			wantPayloadLen: 256,
+			wantChecksum:   0xDEADBEEF,
+			wantErr:        nil,
+		},
+		{
+			name: "valid header with max uint32 payload length",
+			header: []byte{
+				0xBE, 0xAC, // magic
+				0x01,                   // version
+				0x01,                   // record type (Full)
+				0xFF, 0xFF, 0xFF, 0xFF, // payload length = max uint32
+				0x12, 0x34, 0x56, 0x78, // checksum
+			},
+			wantPayloadLen: 0xFFFFFFFF,
+			wantChecksum:   0x12345678,
+			wantErr:        nil,
+		},
+		{
+			name:           "truncated header - empty",
+			header:         []byte{},
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        ErrTruncated,
+		},
+		{
+			name:           "truncated header - 11 bytes",
+			header:         []byte{0xBE, 0xAC, 0x01, 0x01, 0, 0, 0, 5, 0, 0, 0},
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        ErrTruncated,
+		},
+		{
+			name: "bad magic - first byte wrong",
+			header: []byte{
+				0x00, 0xAC, // bad magic
+				0x01, 0x01,
+				0, 0, 0, 0,
+				0, 0, 0, 0,
+			},
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        ErrBadMagic,
+		},
+		{
+			name: "bad magic - second byte wrong",
+			header: []byte{
+				0xBE, 0x00, // bad magic
+				0x01, 0x01,
+				0, 0, 0, 0,
+				0, 0, 0, 0,
+			},
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        ErrBadMagic,
+		},
+		{
+			name: "bad magic - both bytes wrong",
+			header: []byte{
+				0xCA, 0xFE, // bad magic
+				0x01, 0x01,
+				0, 0, 0, 0,
+				0, 0, 0, 0,
+			},
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        ErrBadMagic,
+		},
+		{
+			name: "unsupported version - zero",
+			header: []byte{
+				0xBE, 0xAC,
+				0x00, // version 0
+				0x01,
+				0, 0, 0, 0,
+				0, 0, 0, 0,
+			},
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        ErrUnsupportedVersion,
+		},
+		{
+			name: "unsupported version - future version",
+			header: []byte{
+				0xBE, 0xAC,
+				0x02, // version 2
+				0x01,
+				0, 0, 0, 0,
+				0, 0, 0, 0,
+			},
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        ErrUnsupportedVersion,
+		},
+		{
+			name: "unsupported record type - zero",
+			header: []byte{
+				0xBE, 0xAC,
+				0x01,
+				0x00, // record type 0
+				0, 0, 0, 0,
+				0, 0, 0, 0,
+			},
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        ErrUnsupportedRecordType,
+		},
+		{
+			name: "unsupported record type - unknown type",
+			header: []byte{
+				0xBE, 0xAC,
+				0x01,
+				0xFF, // unknown record type
+				0, 0, 0, 0,
+				0, 0, 0, 0,
+			},
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        ErrUnsupportedRecordType,
+		},
+		{
+			name: "header with extra trailing bytes is valid",
+			header: []byte{
+				0xBE, 0xAC,
+				0x01, 0x01,
+				0, 0, 0, 10,
+				0xAB, 0xCD, 0xEF, 0x12,
+				0xFF, 0xFF, 0xFF, // extra bytes (payload data)
+			},
+			wantPayloadLen: 10,
+			wantChecksum:   0xABCDEF12,
+			wantErr:        nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payloadLen, crc, err := DecodeRecordHeader(tt.header)
+
+			if err != tt.wantErr {
+				t.Errorf("error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if err != nil {
+				return
+			}
+
+			if payloadLen != tt.wantPayloadLen {
+				t.Errorf("payloadLen = %d, want %d", payloadLen, tt.wantPayloadLen)
+			}
+
+			if crc != tt.wantChecksum {
+				t.Errorf("checksum = 0x%X, want 0x%X", crc, tt.wantChecksum)
+			}
+		})
+	}
+}
+
+func TestEncodeDecodeRoundTrip(t *testing.T) {
+	payloads := [][]byte{
+		nil,
+		{},
+		{0x00},
+		{0x01, 0x02, 0x03},
+		[]byte("hello world"),
+		make([]byte, 1000),
+	}
+
+	for _, payload := range payloads {
+		encoded := EncodeRecord(payload)
+		payloadLen, crc, err := DecodeRecordHeader(encoded[:recordHeaderSize])
+		if err != nil {
+			t.Errorf("DecodeRecordHeader failed for payload len %d: %v", len(payload), err)
+			continue
+		}
+
+		if payloadLen != uint32(len(payload)) {
+			t.Errorf("payload length mismatch: got %d, want %d", payloadLen, len(payload))
+		}
+
+		expectedCRC := checksum.CRC32C(payload)
+		if crc != expectedCRC {
+			t.Errorf("checksum mismatch: got 0x%X, want 0x%X", crc, expectedCRC)
+		}
+
+		// Verify payload bytes match
+		if !bytes.Equal(encoded[recordHeaderSize:], payload) {
+			t.Errorf("payload bytes mismatch for len %d", len(payload))
+		}
+	}
+}
+
+func TestCorruptionDetection(t *testing.T) {
+	t.Run("corrupted payload detected by checksum", func(t *testing.T) {
+		payload := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
+		record := EncodeRecord(payload)
+
+		// Corrupt a payload byte
+		record[12] ^= 0xFF
+
+		// Extract stored checksum and compute actual
+		storedChecksum := coding.Uint32(record[8:12])
+		actualChecksum := checksum.CRC32C(record[12:])
+
+		if storedChecksum == actualChecksum {
+			t.Error("corruption should be detectable via checksum mismatch")
+		}
+	})
+
+	t.Run("corrupted length field", func(t *testing.T) {
+		payload := []byte{0x01, 0x02, 0x03}
+		record := EncodeRecord(payload)
+
+		// Corrupt the length field
+		record[4] ^= 0xFF
+
+		payloadLen, _, err := DecodeRecordHeader(record[:recordHeaderSize])
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Length should no longer match actual payload
+		if payloadLen == uint32(len(payload)) {
+			t.Error("corrupted length field should not match original")
+		}
+	})
+
+	t.Run("corrupted magic detected", func(t *testing.T) {
+		payload := []byte{0x01, 0x02, 0x03}
+		record := EncodeRecord(payload)
+
+		// Corrupt the magic
+		record[0] ^= 0xFF
+
+		_, _, err := DecodeRecordHeader(record[:recordHeaderSize])
+		if err != ErrBadMagic {
+			t.Errorf("expected ErrBadMagic, got %v", err)
+		}
+	})
+
+	t.Run("corrupted version detected", func(t *testing.T) {
+		payload := []byte{0x01, 0x02, 0x03}
+		record := EncodeRecord(payload)
+
+		// Corrupt the version
+		record[2] = 0x99
+
+		_, _, err := DecodeRecordHeader(record[:recordHeaderSize])
+		if err != ErrUnsupportedVersion {
+			t.Errorf("expected ErrUnsupportedVersion, got %v", err)
+		}
+	})
+}
+
+// Benchmarks
+
+func BenchmarkEncodeRecord(b *testing.B) {
+	sizes := []struct {
+		name string
+		size int
+	}{
+		{"empty", 0},
+		{"small", 64},
+		{"medium", 1024},
+		{"large", 64 * 1024},
+	}
+
+	for _, s := range sizes {
+		payload := make([]byte, s.size)
+		b.Run(s.name, func(b *testing.B) {
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				EncodeRecord(payload)
+			}
+		})
+	}
+}
+
+func BenchmarkDecodeRecordHeader(b *testing.B) {
+	payload := make([]byte, 1024)
+	record := EncodeRecord(payload)
+	header := record[:recordHeaderSize]
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = DecodeRecordHeader(header)
+	}
+}
+
+// Fuzz tests
+
+func FuzzEncodeRecord(f *testing.F) {
+	// Seed corpus
+	f.Add([]byte{})
+	f.Add([]byte{0x00})
+	f.Add([]byte{0x01, 0x02, 0x03})
+	f.Add([]byte("hello world"))
+
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		record := EncodeRecord(payload)
+
+		// Verify length
+		if len(record) != recordHeaderSize+len(payload) {
+			t.Errorf("unexpected record length: got %d, want %d", len(record), recordHeaderSize+len(payload))
+		}
+
+		// Verify round-trip via header decode
+		payloadLen, crc, err := DecodeRecordHeader(record[:recordHeaderSize])
+		if err != nil {
+			t.Errorf("DecodeRecordHeader failed: %v", err)
+		}
+
+		if payloadLen != uint32(len(payload)) {
+			t.Errorf("payload length mismatch: got %d, want %d", payloadLen, len(payload))
+		}
+
+		expectedCRC := checksum.CRC32C(payload)
+		if crc != expectedCRC {
+			t.Errorf("checksum mismatch: got 0x%X, want 0x%X", crc, expectedCRC)
+		}
+
+		// Verify payload preserved
+		if !bytes.Equal(record[recordHeaderSize:], payload) {
+			t.Error("payload not preserved")
+		}
+	})
+}
+
+func FuzzDecodeRecordHeader(f *testing.F) {
+	// Seed with valid headers
+	validHeader := EncodeRecord([]byte{0x01, 0x02, 0x03})[:recordHeaderSize]
+	f.Add(validHeader)
+	f.Add([]byte{})
+	f.Add([]byte{0xBE, 0xAC, 0x01, 0x01, 0, 0, 0, 0, 0, 0, 0, 0})
+
+	f.Fuzz(func(t *testing.T, header []byte) {
+		// Just ensure it doesn't panic
+		_, _, _ = DecodeRecordHeader(header)
+	})
 }

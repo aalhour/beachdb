@@ -18,4 +18,13 @@ var (
 
 	// ErrUnsupportedVersion indicates when the version part in the header is not supported.
 	ErrUnsupportedVersion = errors.New("wal: unsupported version")
+
+	// ErrUnsupportedRecordType indicates when the record type part in the header is not supported.
+	ErrUnsupportedRecordType = errors.New("wal: unsupported record type")
+
+	// ErrWriterClosed indicates when the wal writer is closed.
+	ErrWriterClosed = errors.New("wal: writer is closed")
+
+	// ErrReaderClosed indicates when the wal reader is closed.
+	ErrReaderClosed = errors.New("wal: reader is closed")
 )
