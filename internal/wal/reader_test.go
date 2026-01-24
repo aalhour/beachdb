@@ -1,0 +1,855 @@
+package wal
+
+import (
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+
+	"github.com/aalhour/beachdb/internal/util/checksum"
+)
+
+func TestNewReader(t *testing.T) {
+	t.Run("opens existing file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "existing.wal")
+
+		// Create the file first
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		if err := os.WriteFile(path, []byte("test data"), 0644); err != nil {
+			t.Fatalf("failed to create test file: %v", err)
+		}
+
+		r, err := NewReader(path)
+		if err != nil {
+			t.Fatalf("NewReader failed: %v", err)
+		}
+		defer r.Close()
+
+		if r.file == nil {
+			t.Error("file should not be nil")
+		}
+		if r.buf == nil {
+			t.Error("buf should not be nil")
+		}
+	})
+
+	t.Run("returns error for non-existent file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nonexistent.wal")
+
+		_, err := NewReader(path)
+		if err == nil {
+			t.Error("expected error for non-existent file")
+		}
+	})
+
+	t.Run("returns error for invalid path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nonexistent", "subdir", "file.wal")
+
+		_, err := NewReader(path)
+		if err == nil {
+			t.Error("expected error for invalid path")
+		}
+	})
+}
+
+func TestReader_Close(t *testing.T) {
+	t.Run("closes successfully", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "close.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+		err := r.Close()
+		if err != nil {
+			t.Errorf("Close failed: %v", err)
+		}
+	})
+
+	t.Run("double close returns ErrReaderClosed", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "double_close.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+
+		err1 := r.Close()
+		if err1 != nil {
+			t.Fatalf("first Close failed: %v", err1)
+		}
+
+		err2 := r.Close()
+		if !errors.Is(err2, ErrReaderClosed) {
+			t.Errorf("second Close should return ErrReaderClosed, got: %v", err2)
+		}
+	})
+
+	t.Run("triple close all return ErrReaderClosed", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "triple_close.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+		r.Close()
+
+		for i := 2; i <= 3; i++ {
+			err := r.Close()
+			if !errors.Is(err, ErrReaderClosed) {
+				t.Errorf("Close #%d should return ErrReaderClosed, got: %v", i, err)
+			}
+		}
+	})
+
+	t.Run("marks reader as closed", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "mark_closed.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+		r.Close()
+
+		if r.file != nil {
+			t.Error("file should be nil after close")
+		}
+		if r.buf != nil {
+			t.Error("buf should be nil after close")
+		}
+	})
+
+	t.Run("concurrent close attempts", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "concurrent_close.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+
+		done := make(chan error, 10)
+		for range 10 {
+			go func() {
+				done <- r.Close()
+			}()
+		}
+
+		var successCount int
+		var closedCount int
+		for range 10 {
+			err := <-done
+			switch {
+			case err == nil:
+				successCount++
+			case errors.Is(err, ErrReaderClosed):
+				closedCount++
+			}
+		}
+
+		if successCount != 1 {
+			t.Errorf("expected exactly 1 successful close, got %d", successCount)
+		}
+		if closedCount != 9 {
+			t.Errorf("expected 9 ErrReaderClosed, got %d", closedCount)
+		}
+	})
+}
+
+func TestReader_Close_EdgeCases(t *testing.T) {
+	t.Run("closed reader returns ErrReaderClosed", func(t *testing.T) {
+		r := &Reader{file: nil, buf: nil}
+
+		err := r.Close()
+		if !errors.Is(err, ErrReaderClosed) {
+			t.Errorf("Close on closed reader should return ErrReaderClosed, got: %v", err)
+		}
+	})
+
+	t.Run("close after file externally closed", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "external_close.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+
+		// Externally close the file
+		r.file.Close()
+
+		// Close should still work (file.Close returns error but reader marks as closed)
+		err := r.Close()
+		// May or may not error depending on OS, but should not panic
+		_ = err
+
+		// Subsequent close should return ErrReaderClosed
+		err2 := r.Close()
+		if !errors.Is(err2, ErrReaderClosed) {
+			t.Errorf("subsequent Close should return ErrReaderClosed, got: %v", err2)
+		}
+	})
+
+	t.Run("handles nil buf with valid file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nil_buf.wal")
+		//nolint:gosec // G304: file path is from t.TempDir() which is safe
+		file, _ := os.Create(path)
+
+		r := &Reader{file: file, buf: nil}
+
+		err := r.Close()
+		if err != nil {
+			t.Errorf("Close with nil buf should succeed, got: %v", err)
+		}
+	})
+}
+
+// TestReader_Close_NoPanic verifies Close never panics under various edge cases
+func TestReader_Close_NoPanic(t *testing.T) {
+	t.Run("nil receiver", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Close panicked on nil receiver: %v", r)
+			}
+		}()
+
+		var r *Reader
+		_ = r.Close() // Will panic on nil receiver - this tests if we handle it
+	})
+
+	t.Run("zero value struct", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Close panicked on zero value: %v", r)
+			}
+		}()
+
+		r := Reader{}
+		_ = r.Close()
+	})
+
+	t.Run("zero value pointer", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Close panicked on zero value pointer: %v", r)
+			}
+		}()
+
+		r := &Reader{}
+		_ = r.Close()
+	})
+
+	t.Run("only file set", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Close panicked with only file set: %v", r)
+			}
+		}()
+
+		path := filepath.Join(t.TempDir(), "only_file.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+		//nolint:gosec // G304: file path is from t.TempDir() which is safe
+		file, _ := os.Open(path)
+
+		r := &Reader{file: file, buf: nil}
+		_ = r.Close()
+	})
+
+	t.Run("100 rapid closes", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Close panicked during rapid closes: %v", r)
+			}
+		}()
+
+		path := filepath.Join(t.TempDir(), "rapid.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+
+		for range 100 {
+			_ = r.Close()
+		}
+	})
+
+	t.Run("close after file externally closed", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Close panicked after external file close: %v", r)
+			}
+		}()
+
+		path := filepath.Join(t.TempDir(), "external_close.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+		r.file.Close()
+
+		_ = r.Close()
+	})
+
+	t.Run("close with corrupted buf state", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Close panicked with corrupted buf: %v", r)
+			}
+		}()
+
+		path := filepath.Join(t.TempDir(), "corrupted_buf.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+		r.buf = nil
+
+		_ = r.Close()
+	})
+
+	t.Run("concurrent close and next", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Close panicked during concurrent operations: %v", r)
+			}
+		}()
+
+		path := filepath.Join(t.TempDir(), "concurrent_ops.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+
+		done := make(chan struct{})
+
+		// Goroutine doing Next calls
+		go func() {
+			defer close(done)
+			for range 100 {
+				_, _ = r.Next()
+			}
+		}()
+
+		// Main goroutine doing closes
+		for range 10 {
+			_ = r.Close()
+		}
+
+		<-done
+	})
+
+	t.Run("close on freshly created reader", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Close panicked on fresh reader: %v", r)
+			}
+		}()
+
+		path := filepath.Join(t.TempDir(), "fresh.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+		_ = r.Close()
+	})
+
+	t.Run("stress test concurrent closes", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Close panicked during stress test: %v", r)
+			}
+		}()
+
+		path := filepath.Join(t.TempDir(), "stress.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte("data"), 0644)
+
+		r, _ := NewReader(path)
+
+		done := make(chan struct{}, 100)
+		for range 100 {
+			go func() {
+				_ = r.Close()
+				done <- struct{}{}
+			}()
+		}
+
+		for range 100 {
+			<-done
+		}
+	})
+}
+
+func TestReader_Next(t *testing.T) {
+	t.Run("reads single record successfully", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "single.wal")
+		payload := []byte("hello, world")
+
+		// Write a valid record using Writer
+		w, err := NewWriter(path)
+		if err != nil {
+			t.Fatalf("NewWriter failed: %v", err)
+		}
+		if err := w.Append(payload); err != nil {
+			t.Fatalf("Append failed: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Writer.Close failed: %v", err)
+		}
+
+		// Read it back
+		r, err := NewReader(path)
+		if err != nil {
+			t.Fatalf("NewReader failed: %v", err)
+		}
+		defer r.Close()
+
+		got, err := r.Next()
+		if err != nil {
+			t.Fatalf("Next failed: %v", err)
+		}
+
+		if !slices.Equal(got, payload) {
+			t.Errorf("got %q, want %q", got, payload)
+		}
+	})
+
+	t.Run("reads multiple records", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "multiple.wal")
+		payloads := [][]byte{
+			[]byte("first"),
+			[]byte("second"),
+			[]byte("third"),
+		}
+
+		// Write records
+		w, _ := NewWriter(path)
+		for _, p := range payloads {
+			w.Append(p)
+		}
+		w.Close()
+
+		// Read them back
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		for i, want := range payloads {
+			got, err := r.Next()
+			if err != nil {
+				t.Fatalf("Next #%d failed: %v", i, err)
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("record #%d: got %q, want %q", i, got, want)
+			}
+		}
+	})
+
+	t.Run("returns EOF on empty file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "empty.wal")
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte{}, 0644)
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		_, err := r.Next()
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("expected io.EOF, got %v", err)
+		}
+	})
+
+	t.Run("returns EOF after last record", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "eof.wal")
+
+		w, _ := NewWriter(path)
+		w.Append([]byte("only record"))
+		w.Close()
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		// First read succeeds
+		_, err := r.Next()
+		if err != nil {
+			t.Fatalf("first Next failed: %v", err)
+		}
+
+		// Second read returns EOF
+		_, err = r.Next()
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("expected io.EOF, got %v", err)
+		}
+	})
+
+	t.Run("returns error on truncated header", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "truncated_header.wal")
+
+		// Write partial header (less than 12 bytes)
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, []byte{0xBE, 0xAC, 0x01, 0x01, 0x00}, 0644)
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		_, err := r.Next()
+		if err == nil {
+			t.Error("expected error for truncated header")
+		}
+	})
+
+	t.Run("returns error on truncated payload", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "truncated_payload.wal")
+
+		// Create a valid header claiming 100 bytes payload, but provide fewer
+		header := make([]byte, recordHeaderSize)
+		header[0] = 0xBE // magic high byte (big-endian: 0xBEAC)
+		header[1] = 0xAC // magic low byte
+		header[2] = 0x01 // version
+		header[3] = 0x01 // type = Full
+		// payload length = 100 (big-endian)
+		header[4] = 0x00
+		header[5] = 0x00
+		header[6] = 0x00
+		header[7] = 0x64 // 100 in hex
+		// checksum (doesn't matter, we'll fail before validation)
+		header[8] = 0x00
+		header[9] = 0x00
+		header[10] = 0x00
+		header[11] = 0x00
+
+		// Only provide 10 bytes of payload
+		data := append(header, make([]byte, 10)...)
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, data, 0644)
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		_, err := r.Next()
+		if !errors.Is(err, ErrTruncated) {
+			t.Errorf("expected ErrTruncated, got %v", err)
+		}
+	})
+
+	t.Run("returns error on bad magic", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "bad_magic.wal")
+
+		// Create header with wrong magic
+		header := make([]byte, recordHeaderSize)
+		header[0] = 0xDE // wrong magic
+		header[1] = 0xAD
+		header[2] = 0x01
+		header[3] = 0x01
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, header, 0644)
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		_, err := r.Next()
+		if !errors.Is(err, ErrBadMagic) {
+			t.Errorf("expected ErrBadMagic, got %v", err)
+		}
+	})
+
+	t.Run("returns error on unsupported version", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "bad_version.wal")
+
+		// Create header with wrong version (big-endian magic: 0xBE, 0xAC)
+		header := make([]byte, recordHeaderSize)
+		header[0] = 0xBE
+		header[1] = 0xAC
+		header[2] = 0x99 // unsupported version
+		header[3] = 0x01
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, header, 0644)
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		_, err := r.Next()
+		if !errors.Is(err, ErrUnsupportedVersion) {
+			t.Errorf("expected ErrUnsupportedVersion, got %v", err)
+		}
+	})
+
+	t.Run("returns error on checksum mismatch", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "bad_checksum.wal")
+
+		payload := []byte("test payload")
+
+		// Write a valid record first
+		w, _ := NewWriter(path)
+		w.Append(payload)
+		w.Close()
+
+		// Corrupt the payload (flip a bit)
+		//nolint:gosec // G304: file path is from t.TempDir() which is safe
+		data, _ := os.ReadFile(path)
+		data[recordHeaderSize] ^= 0x01 // flip bit in first byte of payload
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, data, 0644)
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		_, err := r.Next()
+		if !errors.Is(err, ErrChecksum) {
+			t.Errorf("expected ErrChecksum, got %v", err)
+		}
+	})
+
+	t.Run("reads empty payload", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "empty_payload.wal")
+
+		w, _ := NewWriter(path)
+		w.Append([]byte{}) // empty payload
+		w.Close()
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		got, err := r.Next()
+		if err != nil {
+			t.Fatalf("Next failed: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("expected empty payload, got %q", got)
+		}
+	})
+
+	t.Run("reads binary payload with null bytes", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "binary.wal")
+		payload := []byte{0x00, 0x01, 0x02, 0xFF, 0x00, 0xFE}
+
+		w, _ := NewWriter(path)
+		w.Append(payload)
+		w.Close()
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		got, err := r.Next()
+		if err != nil {
+			t.Fatalf("Next failed: %v", err)
+		}
+		if !slices.Equal(got, payload) {
+			t.Errorf("got %v, want %v", got, payload)
+		}
+	})
+
+	t.Run("reads large payload", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "large.wal")
+
+		// 1MB payload
+		payload := make([]byte, 1024*1024)
+		for i := range payload {
+			payload[i] = byte(i % 256)
+		}
+
+		w, _ := NewWriter(path)
+		w.Append(payload)
+		w.Close()
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		got, err := r.Next()
+		if err != nil {
+			t.Fatalf("Next failed: %v", err)
+		}
+		if !slices.Equal(got, payload) {
+			t.Errorf("payload mismatch (len got=%d, want=%d)", len(got), len(payload))
+		}
+	})
+}
+
+func TestReader_Next_Roundtrip(t *testing.T) {
+	t.Run("write then read many records", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "roundtrip.wal")
+
+		payloads := make([][]byte, 100)
+		for i := range payloads {
+			payloads[i] = []byte("record-" + string(rune('0'+i%10)) + string(rune('0'+i/10)))
+		}
+
+		// Write all
+		w, _ := NewWriter(path)
+		for _, p := range payloads {
+			w.Append(p)
+		}
+		w.Close()
+
+		// Read all
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		for i, want := range payloads {
+			got, err := r.Next()
+			if err != nil {
+				t.Fatalf("Next #%d failed: %v", i, err)
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("record #%d: got %q, want %q", i, got, want)
+			}
+		}
+
+		// Verify EOF
+		_, err := r.Next()
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("expected EOF after all records, got %v", err)
+		}
+	})
+}
+
+func TestReader_Next_EdgeCases(t *testing.T) {
+	t.Run("returns ErrReaderClosed on closed reader", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "closed.wal")
+
+		w, _ := NewWriter(path)
+		w.Append([]byte("test"))
+		w.Close()
+
+		r, _ := NewReader(path)
+		r.Close()
+
+		_, err := r.Next()
+		if !errors.Is(err, ErrReaderClosed) {
+			t.Errorf("expected ErrReaderClosed, got %v", err)
+		}
+	})
+
+	t.Run("returns error on unsupported record type", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "bad_type.wal")
+
+		// Create header with unsupported record type (big-endian magic)
+		header := make([]byte, recordHeaderSize)
+		header[0] = 0xBE
+		header[1] = 0xAC
+		header[2] = 0x01
+		header[3] = 0x99 // unsupported type
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, header, 0644)
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		_, err := r.Next()
+		if !errors.Is(err, ErrUnsupportedRecordType) {
+			t.Errorf("expected ErrUnsupportedRecordType, got %v", err)
+		}
+	})
+
+	t.Run("returns EOF after partial read leaves file exhausted", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "partial.wal")
+
+		w, _ := NewWriter(path)
+		w.Append([]byte("only one"))
+		w.Close()
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		// First call succeeds
+		_, err := r.Next()
+		if err != nil {
+			t.Fatalf("first Next failed: %v", err)
+		}
+
+		// Second, third, fourth all return EOF
+		for i := range 3 {
+			_, err = r.Next()
+			if !errors.Is(err, io.EOF) {
+				t.Errorf("call #%d: expected io.EOF, got %v", i+2, err)
+			}
+		}
+	})
+}
+
+func TestReader_Next_ManualRecordConstruction(t *testing.T) {
+	// These tests manually construct records to test edge cases
+
+	t.Run("valid manually constructed record", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "manual.wal")
+		payload := []byte("test")
+		record := EncodeRecord(payload)
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, record, 0644)
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		got, err := r.Next()
+		if err != nil {
+			t.Fatalf("Next failed: %v", err)
+		}
+		if !slices.Equal(got, payload) {
+			t.Errorf("got %q, want %q", got, payload)
+		}
+	})
+
+	t.Run("corrupted checksum in manually constructed record", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "corrupt.wal")
+		payload := []byte("test")
+
+		// Manually construct with wrong checksum (big-endian magic: 0xBE, 0xAC)
+		record := make([]byte, recordHeaderSize+len(payload))
+		record[0] = 0xBE
+		record[1] = 0xAC
+		record[2] = 0x01
+		record[3] = 0x01
+		record[4] = 0x00
+		record[5] = 0x00
+		record[6] = 0x00
+		record[7] = byte(len(payload))
+		// Wrong checksum
+		record[8] = 0xDE
+		record[9] = 0xAD
+		record[10] = 0xBE
+		record[11] = 0xEF
+		copy(record[12:], payload)
+
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, record, 0644)
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		_, err := r.Next()
+		if !errors.Is(err, ErrChecksum) {
+			t.Errorf("expected ErrChecksum, got %v", err)
+		}
+	})
+
+	t.Run("correct checksum validates", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "correct_checksum.wal")
+		payload := []byte("test payload")
+		csum := checksum.CRC32C(payload)
+
+		// Manually construct with correct checksum (big-endian magic: 0xBE, 0xAC)
+		record := make([]byte, recordHeaderSize+len(payload))
+		record[0] = 0xBE
+		record[1] = 0xAC
+		record[2] = 0x01
+		record[3] = 0x01
+		record[4] = 0x00
+		record[5] = 0x00
+		record[6] = 0x00
+		record[7] = byte(len(payload))
+		// Correct checksum (big-endian)
+		record[8] = byte(csum >> 24)
+		record[9] = byte(csum >> 16)
+		record[10] = byte(csum >> 8)
+		record[11] = byte(csum)
+		copy(record[12:], payload)
+
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		os.WriteFile(path, record, 0644)
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		got, err := r.Next()
+		if err != nil {
+			t.Fatalf("Next failed: %v", err)
+		}
+		if !slices.Equal(got, payload) {
+			t.Errorf("got %q, want %q", got, payload)
+		}
+	})
+}

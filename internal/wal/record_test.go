@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/aalhour/beachdb/internal/util/checksum"
@@ -82,6 +83,7 @@ func TestEncodeRecord(t *testing.T) {
 
 			// Check payload length field
 			gotPayloadLen := coding.Uint32(got[4:8])
+			//nolint:gosec // G115: len(tt.payload) is bounded by test data, overflow not possible
 			if gotPayloadLen != uint32(len(tt.payload)) {
 				t.Errorf("payloadLen = %d, want %d", gotPayloadLen, len(tt.payload))
 			}
@@ -309,7 +311,7 @@ func TestDecodeRecordHeader(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			payloadLen, crc, err := DecodeRecordHeader(tt.header)
 
-			if err != tt.wantErr {
+			if !errors.Is(err, tt.wantErr) {
 				t.Errorf("error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
@@ -347,6 +349,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 			continue
 		}
 
+		//nolint:gosec // G115: len(payload) is bounded by test data, overflow not possible
 		if payloadLen != uint32(len(payload)) {
 			t.Errorf("payload length mismatch: got %d, want %d", payloadLen, len(payload))
 		}
@@ -393,6 +396,7 @@ func TestCorruptionDetection(t *testing.T) {
 		}
 
 		// Length should no longer match actual payload
+		//nolint:gosec // G115: len(payload) is bounded by test data, overflow not possible
 		if payloadLen == uint32(len(payload)) {
 			t.Error("corrupted length field should not match original")
 		}
@@ -406,7 +410,7 @@ func TestCorruptionDetection(t *testing.T) {
 		record[0] ^= 0xFF
 
 		_, _, err := DecodeRecordHeader(record[:recordHeaderSize])
-		if err != ErrBadMagic {
+		if !errors.Is(err, ErrBadMagic) {
 			t.Errorf("expected ErrBadMagic, got %v", err)
 		}
 	})
@@ -419,10 +423,45 @@ func TestCorruptionDetection(t *testing.T) {
 		record[2] = 0x99
 
 		_, _, err := DecodeRecordHeader(record[:recordHeaderSize])
-		if err != ErrUnsupportedVersion {
+		if !errors.Is(err, ErrUnsupportedVersion) {
 			t.Errorf("expected ErrUnsupportedVersion, got %v", err)
 		}
 	})
+}
+
+func TestValidateRecord(t *testing.T) {
+	tests := []struct {
+		name             string
+		payload          []byte
+		expectedChecksum uint32
+		wantErr          error
+	}{
+		{
+			name:             "correct checksum returns no error",
+			payload:          []byte{0x01, 0x02, 0x03, 0x04, 0x05},
+			expectedChecksum: checksum.CRC32C([]byte{0x01, 0x02, 0x03, 0x04, 0x05}),
+			wantErr:          nil,
+		},
+		{
+			name: "corrupted payload returns checksum error",
+			payload: func() []byte {
+				p := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
+				p[1] ^= 0x02 // Flip bit 1 of second byte (0x02 → 0x00)
+				return p
+			}(),
+			expectedChecksum: checksum.CRC32C([]byte{0x01, 0x02, 0x03, 0x04, 0x05}),
+			wantErr:          ErrChecksum,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotErr := ValidateRecord(test.payload, test.expectedChecksum)
+			if !errors.Is(gotErr, test.wantErr) {
+				t.Errorf("expected %v error but got %v instead", test.wantErr, gotErr)
+			}
+		})
+	}
 }
 
 // Benchmarks
@@ -457,7 +496,8 @@ func BenchmarkDecodeRecordHeader(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	//nolint:modernize // bloop: b.Loop() API not available in current Go version
+	for range b.N {
 		_, _, _ = DecodeRecordHeader(header)
 	}
 }
@@ -485,6 +525,7 @@ func FuzzEncodeRecord(f *testing.F) {
 			t.Errorf("DecodeRecordHeader failed: %v", err)
 		}
 
+		//nolint:gosec // G115: len(payload) is bounded by fuzz input, overflow not possible
 		if payloadLen != uint32(len(payload)) {
 			t.Errorf("payload length mismatch: got %d, want %d", payloadLen, len(payload))
 		}
@@ -508,7 +549,7 @@ func FuzzDecodeRecordHeader(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte{0xBE, 0xAC, 0x01, 0x01, 0, 0, 0, 0, 0, 0, 0, 0})
 
-	f.Fuzz(func(t *testing.T, header []byte) {
+	f.Fuzz(func(_ *testing.T, header []byte) {
 		// Just ensure it doesn't panic
 		_, _, _ = DecodeRecordHeader(header)
 	})
