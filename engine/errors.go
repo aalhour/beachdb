@@ -14,4 +14,10 @@ var (
 
 	// ErrTruncatedBatch indicates a truncated or incomplete batch.
 	ErrTruncatedBatch = errors.New("beachdb: truncated batch")
+
+	// ErrDBClosed indicates that the database is already closed.
+	ErrDBClosed = errors.New("beachdb: database already closed")
+
+	// ErrKeyNotFound indicates that a key doesn't exist in the database.
+	ErrKeyNotFound = errors.New("beachdb: key not found")
 )
