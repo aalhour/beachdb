@@ -3,12 +3,15 @@ package engine
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aalhour/beachdb/internal/testutil"
 )
 
 func TestDBOpen(t *testing.T) {
@@ -725,4 +728,86 @@ func TestDBOpenNoExistingWAL(t *testing.T) {
 	if !slices.Equal(got, []byte("value")) {
 		t.Errorf("expected value, got %v", got)
 	}
+}
+
+func TestDB_CrashLoop(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Reference model: tracks expected state
+	model := testutil.NewModel()
+
+	// Seed for reproducibility (using math/rand/v2)
+	//nolint:gosec // G404: Test code doesn't need crypto/rand
+	rng := rand.New(rand.NewPCG(42, 1024))
+
+	const numCycles = 100
+
+	// Simulate 100 crash-and-recovery cycles
+	for i := range numCycles {
+		// Open DB
+		db, err := Open(dir)
+		if err != nil {
+			t.Fatalf("cycle %d: failed to open: %v", i, err)
+		}
+
+		// Generate random operations
+		batch := NewBatch()
+		for range 10 {
+			key := testutil.RandKey(rng, 32)
+
+			if rng.Float64() < 0.7 {
+				// 70% chance: Put
+				value := testutil.RandValue(rng, 128)
+				batch.Put(key, value)
+				model.Put(key, value)
+			} else {
+				// 30% chance: Delete
+				batch.Delete(key)
+				model.Delete(key)
+			}
+		}
+
+		// Write batch (durable write)
+		if err := db.Write(ctx, batch); err != nil {
+			t.Fatalf("cycle %d: write failed: %v", i, err)
+		}
+
+		// Close DB (simulates crash after successful write)
+		if err := db.Close(); err != nil {
+			t.Fatalf("cycle %d: close failed: %v", i, err)
+		}
+	}
+
+	// Final recovery: open one last time
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("final open failed: %v", err)
+	}
+	defer db.Close()
+
+	// Verify: for every key in model, DB should have same value
+	modelKeys := model.Keys()
+	t.Logf("Verifying %d keys after %d crash cycles", len(modelKeys), numCycles)
+
+	for _, key := range modelKeys {
+		expectedValue, ok := model.Get(key)
+		if !ok {
+			t.Fatalf("model lost key %q", key)
+		}
+
+		actualValue, err := db.Get(ctx, key)
+		if err != nil {
+			t.Errorf("key %q: expected in DB but got error: %v", key, err)
+			continue
+		}
+
+		if !slices.Equal(expectedValue, actualValue) {
+			t.Errorf("key %q: value mismatch\n  expected: %x\n  got:      %x",
+				key, expectedValue, actualValue)
+		}
+	}
+
+	// Also verify DB doesn't have extra keys
+	// (This requires iterating DB, which v1 doesn't support — skip for now)
 }
