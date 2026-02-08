@@ -1,4 +1,4 @@
-.PHONY: all build test coverage lint fmt clean help
+.PHONY: all build test coverage lint fmt clean examples help
 
 # Default target
 all: build
@@ -15,6 +15,15 @@ build:
 ## test: Run all tests
 test:
 	go test ./...
+
+## examples: Run all example programs
+examples:
+	@echo "Running examples..."
+	@for file in $$(find examples -name "*.go" -type f | sort); do \
+		echo "\n=== Running $$file ==="; \
+		go run $$file || exit 1; \
+	done
+	@echo "\n✓ All examples completed successfully"
 
 ## coverage: Run tests with coverage report
 coverage:
