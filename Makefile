@@ -1,4 +1,4 @@
-.PHONY: all build test coverage lint fmt clean help
+.PHONY: all build test coverage lint fmt clean examples help
 
 # Default target
 all: build
@@ -16,6 +16,15 @@ build:
 test:
 	go test ./...
 
+## examples: Run all example programs
+examples:
+	@echo "Running examples..."
+	@for file in $$(find examples -name "*.go" -type f | sort); do \
+		echo "\n=== Running $$file ==="; \
+		go run $$file || exit 1; \
+	done
+	@echo "\n✓ All examples completed successfully"
+
 ## coverage: Run tests with coverage report
 coverage:
 	go test -coverprofile=coverage.out ./...
@@ -29,6 +38,9 @@ lint:
 ## fmt: Format code using golangci-lint formatters
 fmt:
 	golangci-lint fmt ./...
+
+## check: Runs fmt, lint and test
+check: fmt lint test
 
 ## clean: Remove build artifacts and test output
 clean:

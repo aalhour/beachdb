@@ -26,8 +26,8 @@ BeachDB is my attempt to re-learn the fundamentals by building them from scratch
 > This list is ordered to match the build + blog sequence. I’ll tick these off as they land.
 
 ### Engine (storage truth)
-- [ ] **Scope + semantics contract** (snapshots, iterators, durability)
-- [ ] **WAL v1**: checksums + deterministic crash recovery (**fsync per committed batch**)
+- [x] **Scope + semantics contract** (snapshots, iterators, durability), see: [intro blog post](https://aalhour.com/posts/building-beachdb/)
+- [x] **WAL v1**: checksums + deterministic crash recovery (**fsync per committed batch**), see: [durability blog post](https://aalhour.com/posts/beachdb-wal-v1-milestone/)
 - [ ] **Crash-loop harness**: kill mid-write, reopen, validate invariants
 - [ ] **Memtable v1**: sorted structure + tombstones
 - [ ] **Reference-model randomized tests** (model vs implementation)
