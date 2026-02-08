@@ -6,6 +6,10 @@ version: "2"
 run:
   timeout: 5m
   modules-download-mode: readonly
+  skip-dirs:
+    - examples
+  skip-files:
+    - "examples/.*\\.go$"
 
 linters:
   # Start with default linters, then add more
@@ -151,6 +155,18 @@ linters:
     presets:
       - std-error-handling
     rules:
+      # Exclude examples from all linters (they're for demonstration, not production)
+      - path: examples/
+        linters:
+          - revive
+          - errorlint
+          - wrapcheck
+          - errcheck
+          - gosec
+          - funlen
+          - gocyclo
+          - gocognit
+
       # Exclude some linters from running on tests
       - path: _test\.go
         linters:

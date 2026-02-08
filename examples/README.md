@@ -6,10 +6,10 @@ Runnable examples demonstrating BeachDB usage patterns.
 
 ```bash
 # Run an example
-go run examples/engine/basic_usage.go
+go run examples/engine/basic_usage/main.go
 
 # Or build and run
-go build -o bin/example examples/engine/basic_usage.go
+go build -o bin/example examples/engine/basic_usage
 ./bin/example
 ```
 
@@ -17,9 +17,9 @@ go build -o bin/example examples/engine/basic_usage.go
 
 ### Engine
 
-- **basic_usage.go** — Simple Put/Get/Delete operations
-- **batch_operations.go** — Atomic batch writes
-- **crash_recovery.go** — Durability and WAL recovery
-- **options.go** — Configuration with functional options
+- **basic_usage/** — Simple Put/Get/Delete operations
+- **batch_operations/** — Atomic batch writes
+- **crash_recovery/** — Durability and WAL recovery
+- **options/** — Configuration with functional options
 
 Each example is self-contained and includes cleanup code.
