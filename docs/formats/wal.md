@@ -105,11 +105,10 @@ v1 does not attempt repair. Corruption is surfaced, not hidden.
 I decided to put the checksum in the header (before the payload) rather than as a trailing field. This means the reader can:
 
 1. Read 12 bytes (fixed header size).
-2. Know the payload length.
-3. Know the expected checksum before reading the payload.
-4. Validate immediately after reading, without backtracking.
+2. Know the payload length and expected checksum before reading anything else.
+3. Reject obviously broken headers (bad magic, absurd length) without reading the payload at all.
 
-If the checksum were a trailer, I'd have to read the entire payload before I could validate it. With the checksum upfront, I can fail fast on corruption without wasting I/O on garbage bytes.
+To be clear: we still have to read the entire payload to compute the checksum and compare it. There's no magic here — CRC32 needs all the bytes. But with everything in the header, we read once (header), know exactly how much to read next (payload), and have the expected checksum ready for comparison. No backtracking, no extra read for a trailer.
 
 The tradeoff is that the writer must compute the checksum before writing the header, which means buffering the payload in memory first. For BeachDB's workload (small batches, fsync per batch), this is fine.
 
