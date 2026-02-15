@@ -1,0 +1,56 @@
+package engine
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestSyncDir_ValidDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := syncDir(dir); err != nil {
+		t.Fatalf("syncDir on valid directory: %v", err)
+	}
+}
+
+func TestSyncDir_WithNewFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a file inside the directory (simulates WAL creation)
+	path := filepath.Join(dir, "test.wal")
+	if err := os.WriteFile(path, []byte("data"), 0600); err != nil {
+		t.Fatalf("creating file: %v", err)
+	}
+
+	// Sync the directory — this is the operation we're testing
+	if err := syncDir(dir); err != nil {
+		t.Fatalf("syncDir after file creation: %v", err)
+	}
+}
+
+func TestSyncDir_NonexistentPath(t *testing.T) {
+	err := syncDir("/nonexistent/path/that/does/not/exist")
+	if err == nil {
+		t.Fatal("expected error for nonexistent directory, got nil")
+	}
+}
+
+func TestSyncDir_FileNotDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a regular file and try to syncDir on it
+	path := filepath.Join(dir, "not-a-dir.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0600); err != nil {
+		t.Fatalf("creating file: %v", err)
+	}
+
+	// syncDir on a regular file should still succeed —
+	// os.Open + Sync works on files too. This test documents
+	// the behavior: syncDir doesn't validate that path is a directory.
+	// If you want to enforce directory-only, add an os.Stat check.
+	err := syncDir(path)
+	if err != nil {
+		t.Logf("syncDir on regular file returned: %v (platform-dependent)", err)
+	}
+}

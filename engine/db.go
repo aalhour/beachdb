@@ -59,6 +59,15 @@ func Open(dir string, opts ...Option) (*DB, error) {
 	}
 	db.wal = writer
 
+	// Sync the directory so the WAL file's directory entry reaches disk.
+	// Without this, a crash could leave the WAL data on disk but the
+	// directory unaware the file exists.
+	if err := syncDir(dir); err != nil {
+		// Best effort: close the writer before returning
+		_ = writer.Close()
+		return nil, err
+	}
+
 	return db, nil
 }
 
