@@ -1,4 +1,5 @@
-package engine
+// Package keys define the internal key type of beachdb
+package keys
 
 import (
 	"bytes"

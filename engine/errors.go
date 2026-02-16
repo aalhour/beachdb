@@ -20,7 +20,4 @@ var (
 
 	// ErrKeyNotFound indicates that a key doesn't exist in the database.
 	ErrKeyNotFound = errors.New("beachdb: key not found")
-
-	// ErrCorruptInternalKey indicates that an error occurred when decoding internal key from bytes.
-	ErrCorruptInternalKey = errors.New("beachdb: corrupt internal key")
 )
