@@ -31,9 +31,9 @@ func Open(dir string, opts ...Option) (*DB, error) {
 	// Process configuration options
 	cfg := applyOptions(opts)
 
-	// Create directory for the database
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return nil, fmt.Errorf("beachdb: failed to create directory: %w", err)
+	// Create directory for the database and fsync created directory entries.
+	if err := mkdirAllAndSync(dir); err != nil {
+		return nil, err
 	}
 
 	// Initialize the DB struct

@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -52,5 +53,99 @@ func TestSyncDir_FileNotDirectory(t *testing.T) {
 	err := syncDir(path)
 	if err != nil {
 		t.Logf("syncDir on regular file returned: %v (platform-dependent)", err)
+	}
+}
+
+func TestMkdirAllAndSync_CreatesNestedDirectories(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "a", "b", "c")
+
+	if err := mkdirAllAndSync(target); err != nil {
+		t.Fatalf("mkdirAllAndSync failed: %v", err)
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat target dir: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("target is not a directory: %s", target)
+	}
+}
+
+func TestMkdirAllAndSync_ExistingDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := mkdirAllAndSync(dir); err != nil {
+		t.Fatalf("mkdirAllAndSync on existing directory failed: %v", err)
+	}
+}
+
+func TestMkdirAllAndSync_IdempotentNestedPath(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "nested", "path", "db")
+
+	if err := mkdirAllAndSync(target); err != nil {
+		t.Fatalf("first mkdirAllAndSync failed: %v", err)
+	}
+	if err := mkdirAllAndSync(target); err != nil {
+		t.Fatalf("second mkdirAllAndSync failed: %v", err)
+	}
+}
+
+func TestMkdirAllAndSync_PathComponentIsFile(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "not-a-dir")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatalf("creating blocking file: %v", err)
+	}
+
+	target := filepath.Join(file, "child")
+	if err := mkdirAllAndSync(target); err == nil {
+		t.Fatal("expected error when path component is a file, got nil")
+	}
+}
+
+func TestMissingDirs_ReturnsCreationOrder(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "a", "b", "c")
+
+	got, err := missingDirs(target)
+	if err != nil {
+		t.Fatalf("missingDirs failed: %v", err)
+	}
+
+	want := []string{
+		filepath.Join(root, "a"),
+		filepath.Join(root, "a", "b"),
+		filepath.Join(root, "a", "b", "c"),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("wrong creation order: got=%v want=%v", got, want)
+	}
+}
+
+func TestMissingDirs_ExistingPathReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+
+	got, err := missingDirs(dir)
+	if err != nil {
+		t.Fatalf("missingDirs failed on existing path: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected no missing directories, got %v", got)
+	}
+}
+
+func TestMissingDirs_PathComponentIsFile(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatalf("creating file: %v", err)
+	}
+
+	target := filepath.Join(file, "child")
+	if _, err := missingDirs(target); err == nil {
+		t.Fatal("expected error when path component is a file, got nil")
 	}
 }
