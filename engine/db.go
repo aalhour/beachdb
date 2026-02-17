@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/aalhour/beachdb/internal/keys"
+	"github.com/aalhour/beachdb/internal/memtable"
 	"github.com/aalhour/beachdb/internal/wal"
 )
 
@@ -22,7 +24,8 @@ type DB struct {
 	mu          sync.RWMutex      // synchronization for safe concurrency.
 	dir         string            // path on disk to write data into.
 	wal         *wal.Writer       // Writer for WAL file.
-	mem         map[string][]byte // Not a memtable (yet), just a POC for now!
+	mem         memtable.Memtable // Memory table data structure
+	seqno       uint64            // Monotonic sequence counter
 	syncOnWrite bool              // Option: Whether the DB should fsync writes or not.
 }
 
@@ -39,7 +42,8 @@ func Open(dir string, opts ...Option) (*DB, error) {
 	// Initialize the DB struct
 	db := &DB{
 		dir:         dir,
-		mem:         make(map[string][]byte),
+		mem:         memtable.NewSkipList(),
+		seqno:       0,
 		syncOnWrite: cfg.syncOnWrite,
 	}
 
@@ -125,8 +129,8 @@ func (db *DB) Get(ctx context.Context, key []byte) (value []byte, err error) {
 		return nil, fmt.Errorf("beachdb: Get call canceled: %w", err)
 	}
 
-	value, ok := db.mem[string(key)]
-	if !ok {
+	value, found := db.mem.Get(key, db.seqno)
+	if !found {
 		return nil, ErrKeyNotFound
 	}
 	return value, nil
@@ -167,7 +171,7 @@ func (db *DB) Close() error {
 
 	// Mark it as closed
 	db.wal = nil
-	clear(db.mem)
+	db.mem = nil
 
 	return err
 }
@@ -179,12 +183,26 @@ func (db *DB) applyBatch(b *Batch) {
 	}
 
 	for _, op := range b.ops {
+		// Increase monotonic counter
+		db.seqno++
+
+		// Lookup correct internal key kind
+		var kind byte
 		switch op.opType {
 		case OpTypePut:
-			db.mem[string(op.key)] = op.value
+			kind = keys.InternalKeyKindPut
 		case OpTypeDelete:
-			delete(db.mem, string(op.key))
+			kind = keys.InternalKeyKindDelete
 		}
+
+		// Add key-value pair to the memtable
+		internalKey := keys.InternalKey{
+			UserKey: op.key,
+			Seqno:   db.seqno,
+			Kind:    kind,
+		}
+
+		db.mem.Put(internalKey, op.value)
 	}
 }
 

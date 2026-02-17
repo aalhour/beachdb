@@ -2,6 +2,7 @@
 package memtable
 
 import (
+	"bytes"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -147,6 +148,51 @@ func (sl *SkipList) Put(key keys.InternalKey, value []byte) {
 
 	sl.length++
 	sl.size += int64(newNode.memSize())
+}
+
+// Get returns the value for the given userKey at or before the given seqno.
+// Returns (value, true) if found, (nil, false) if not found or deleted.
+//
+// Semantics: finds the newest version of userKey with seqno <= requested seqno.
+// If that version is a tombstone (KindDelete), returns (nil, false).
+func (sl *SkipList) Get(userKey []byte, seqno uint64) ([]byte, bool) {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+
+	// Create a search key with the target seqno
+	// because seqno is descending, searching for (userKey, seqno) finds
+	// the first entry with that userKey and seqno <= target
+	searchKey := keys.InternalKey{
+		UserKey: userKey,
+		Seqno:   seqno,
+	}
+	preds := sl.findPredecessors(searchKey)
+
+	// Check the node after predecessor
+	node := preds[0].next[0]
+	if node == nil {
+		return nil, false
+	}
+
+	// Check if it matches our user key
+	if !bytes.Equal(node.key.UserKey, userKey) {
+		return nil, false
+	}
+
+	// Check if the seqno is <= our target (it should be, by ordering)
+	if node.key.Seqno > seqno {
+		return nil, false // Version is too new
+	}
+
+	// Check if it's a tombstone
+	if node.key.Kind == keys.InternalKeyKindDelete {
+		return nil, false // Key was deleted
+	}
+
+	// Found it! Return a *copy* of the value
+	result := make([]byte, len(node.value))
+	copy(result, node.value)
+	return result, true
 }
 
 // Len returns the number of entries in the skip list.

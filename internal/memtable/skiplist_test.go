@@ -208,6 +208,8 @@ func TestFindPredecessors(t *testing.T) {
 	}
 }
 
+// === Put tests ===
+
 func TestPut_BasicCases(t *testing.T) {
 	makeKey := func(userKey string, seqno uint64) keys.InternalKey {
 		return keys.InternalKey{
@@ -458,7 +460,7 @@ func TestPut_LenAndSize(t *testing.T) {
 func TestPut_LargeScale(t *testing.T) {
 	// Insert many entries and verify they're all findable
 	sl := NewSkipList()
-	const n = 1000
+	const n = 10000
 
 	lookup := func(sl *SkipList, key keys.InternalKey) ([]byte, bool) {
 		node := sl.head.next[0]
@@ -581,6 +583,356 @@ func TestPut_ConcurrentReadWrite(t *testing.T) {
 	expectedLen := 2 * iterations
 	if sl.Len() != expectedLen {
 		t.Errorf("Len() = %d, want %d", sl.Len(), expectedLen)
+	}
+}
+
+// =============================================================================
+// Get tests
+//
+// Key concept: InternalKey ordering is (userKey ASC, seqno DESC).
+// So for the same userKey, higher seqno entries come FIRST in the skiplist.
+//
+// Get(userKey, seqno) finds the newest version of userKey that is visible
+// at the given seqno. "Visible" means the entry's seqno <= requested seqno.
+// =============================================================================
+
+func TestGet_EmptyList(t *testing.T) {
+	sl := NewSkipList()
+
+	// Any Get on an empty list should return (nil, false)
+	val, ok := sl.Get([]byte("anything"), 100)
+	if ok || val != nil {
+		t.Errorf("empty list: Get returned (%q, %v), want (nil, false)", val, ok)
+	}
+}
+
+func TestGet_SingleEntry(t *testing.T) {
+	t.Run("exact match", func(t *testing.T) {
+		sl := NewSkipList()
+		sl.Put(keys.InternalKey{UserKey: []byte("foo"), Seqno: 5, Kind: keys.InternalKeyKindPut}, []byte("bar"))
+
+		val, ok := sl.Get([]byte("foo"), 5)
+		if !ok || string(val) != "bar" {
+			t.Errorf("Get(foo, 5) = (%q, %v), want (bar, true)", val, ok)
+		}
+	})
+
+	t.Run("higher seqno sees the entry", func(t *testing.T) {
+		// Entry at seqno 5 should be visible at seqno 10
+		sl := NewSkipList()
+		sl.Put(keys.InternalKey{UserKey: []byte("foo"), Seqno: 5, Kind: keys.InternalKeyKindPut}, []byte("bar"))
+
+		val, ok := sl.Get([]byte("foo"), 10)
+		if !ok || string(val) != "bar" {
+			t.Errorf("Get(foo, 10) = (%q, %v), want (bar, true)", val, ok)
+		}
+	})
+
+	t.Run("lower seqno cannot see the entry", func(t *testing.T) {
+		// Entry at seqno 5 should NOT be visible at seqno 4
+		sl := NewSkipList()
+		sl.Put(keys.InternalKey{UserKey: []byte("foo"), Seqno: 5, Kind: keys.InternalKeyKindPut}, []byte("bar"))
+
+		val, ok := sl.Get([]byte("foo"), 4)
+		if ok || val != nil {
+			t.Errorf("Get(foo, 4) = (%q, %v), want (nil, false)", val, ok)
+		}
+	})
+
+	t.Run("wrong userKey not found", func(t *testing.T) {
+		sl := NewSkipList()
+		sl.Put(keys.InternalKey{UserKey: []byte("foo"), Seqno: 5, Kind: keys.InternalKeyKindPut}, []byte("bar"))
+
+		val, ok := sl.Get([]byte("bar"), 5) // different userKey
+		if ok || val != nil {
+			t.Errorf("Get(bar, 5) = (%q, %v), want (nil, false)", val, ok)
+		}
+	})
+}
+
+func TestGet_MultipleKeys(t *testing.T) {
+	sl := NewSkipList()
+
+	// Insert multiple distinct keys
+	sl.Put(keys.InternalKey{UserKey: []byte("apple"), Seqno: 1, Kind: keys.InternalKeyKindPut}, []byte("red"))
+	sl.Put(keys.InternalKey{UserKey: []byte("banana"), Seqno: 2, Kind: keys.InternalKeyKindPut}, []byte("yellow"))
+	sl.Put(keys.InternalKey{UserKey: []byte("cherry"), Seqno: 3, Kind: keys.InternalKeyKindPut}, []byte("red"))
+
+	tests := []struct {
+		userKey string
+		seqno   uint64
+		want    string
+		ok      bool
+	}{
+		{"apple", 1, "red", true},
+		{"apple", 100, "red", true}, // higher seqno still sees it
+		{"banana", 2, "yellow", true},
+		{"cherry", 3, "red", true},
+		{"cherry", 2, "", false},   // seqno too low
+		{"durian", 100, "", false}, // key doesn't exist
+	}
+
+	for _, tt := range tests {
+		val, ok := sl.Get([]byte(tt.userKey), tt.seqno)
+		if ok != tt.ok || (ok && string(val) != tt.want) {
+			t.Errorf("Get(%q, %d) = (%q, %v), want (%q, %v)",
+				tt.userKey, tt.seqno, val, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestGet_VersionSemantics(t *testing.T) {
+	// Multiple versions of the same userKey at different seqnos.
+	// Get should return the newest version that is <= requested seqno.
+	//
+	// Skiplist order (seqno DESC): ver@5 -> ver@3 -> ver@1
+	sl := NewSkipList()
+	sl.Put(keys.InternalKey{UserKey: []byte("ver"), Seqno: 3, Kind: keys.InternalKeyKindPut}, []byte("v3"))
+	sl.Put(keys.InternalKey{UserKey: []byte("ver"), Seqno: 1, Kind: keys.InternalKeyKindPut}, []byte("v1"))
+	sl.Put(keys.InternalKey{UserKey: []byte("ver"), Seqno: 5, Kind: keys.InternalKeyKindPut}, []byte("v5"))
+
+	tests := []struct {
+		name   string
+		seqno  uint64
+		want   string
+		wantOK bool
+	}{
+		// Request seqno higher than any entry: get newest (v5)
+		{"seqno=100 -> newest visible is v5", 100, "v5", true},
+		{"seqno=6 -> newest visible is v5", 6, "v5", true},
+
+		// Exact matches
+		{"seqno=5 exact match -> v5", 5, "v5", true},
+		{"seqno=3 exact match -> v3", 3, "v3", true},
+		{"seqno=1 exact match -> v1", 1, "v1", true},
+
+		// Between versions: get the next older one
+		{"seqno=4 -> newest visible is v3", 4, "v3", true},
+		{"seqno=2 -> newest visible is v1", 2, "v1", true},
+
+		// Below minimum seqno: nothing visible
+		{"seqno=0 -> nothing visible", 0, "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			val, ok := sl.Get([]byte("ver"), tt.seqno)
+			if ok != tt.wantOK {
+				t.Errorf("Get(ver, %d): ok=%v, want ok=%v", tt.seqno, ok, tt.wantOK)
+			}
+			if ok && string(val) != tt.want {
+				t.Errorf("Get(ver, %d) = %q, want %q", tt.seqno, val, tt.want)
+			}
+		})
+	}
+}
+
+func TestGet_Tombstones(t *testing.T) {
+	// Tombstones (KindDelete) should cause Get to return (nil, false).
+	// A tombstone at seqno N means "key was deleted at time N".
+
+	t.Run("tombstone hides key at same seqno", func(t *testing.T) {
+		sl := NewSkipList()
+		// Put then delete at same seqno (unlikely in practice, but tests the logic)
+		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 5, Kind: keys.InternalKeyKindPut}, []byte("val"))
+		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 5, Kind: keys.InternalKeyKindDelete}, nil)
+
+		// The tombstone comes first in sort order (same seqno, inserted later)
+		val, ok := sl.Get([]byte("k"), 5)
+		if ok || val != nil {
+			t.Errorf("Get(k, 5) = (%q, %v), want (nil, false) due to tombstone", val, ok)
+		}
+	})
+
+	t.Run("tombstone at newer seqno hides older value", func(t *testing.T) {
+		sl := NewSkipList()
+		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 3, Kind: keys.InternalKeyKindPut}, []byte("old"))
+		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 5, Kind: keys.InternalKeyKindDelete}, nil) // delete
+
+		// At seqno 5: tombstone is visible -> not found
+		val, ok := sl.Get([]byte("k"), 5)
+		if ok || val != nil {
+			t.Errorf("Get(k, 5) = (%q, %v), want (nil, false)", val, ok)
+		}
+
+		// At seqno 6: tombstone is still the newest visible -> not found
+		val, ok = sl.Get([]byte("k"), 6)
+		if ok || val != nil {
+			t.Errorf("Get(k, 6) = (%q, %v), want (nil, false)", val, ok)
+		}
+
+		// At seqno 4: tombstone not visible, but put@3 is -> found
+		val, ok = sl.Get([]byte("k"), 4)
+		if !ok || string(val) != "old" {
+			t.Errorf("Get(k, 4) = (%q, %v), want (old, true)", val, ok)
+		}
+	})
+
+	t.Run("put after delete resurrects key", func(t *testing.T) {
+		sl := NewSkipList()
+		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 1, Kind: keys.InternalKeyKindPut}, []byte("first"))
+		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 3, Kind: keys.InternalKeyKindDelete}, nil)
+		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 5, Kind: keys.InternalKeyKindPut}, []byte("resurrected"))
+
+		// At seqno 5: put@5 is newest -> found
+		val, ok := sl.Get([]byte("k"), 5)
+		if !ok || string(val) != "resurrected" {
+			t.Errorf("Get(k, 5) = (%q, %v), want (resurrected, true)", val, ok)
+		}
+
+		// At seqno 4: tombstone@3 is newest visible -> not found
+		val, ok = sl.Get([]byte("k"), 4)
+		if ok || val != nil {
+			t.Errorf("Get(k, 4) = (%q, %v), want (nil, false)", val, ok)
+		}
+
+		// At seqno 2: put@1 is newest visible -> found
+		val, ok = sl.Get([]byte("k"), 2)
+		if !ok || string(val) != "first" {
+			t.Errorf("Get(k, 2) = (%q, %v), want (first, true)", val, ok)
+		}
+	})
+}
+
+func TestGet_EdgeCases(t *testing.T) {
+	t.Run("empty userKey", func(t *testing.T) {
+		sl := NewSkipList()
+		sl.Put(keys.InternalKey{UserKey: []byte{}, Seqno: 1, Kind: keys.InternalKeyKindPut}, []byte("empty"))
+
+		val, ok := sl.Get([]byte{}, 1)
+		if !ok || string(val) != "empty" {
+			t.Errorf("Get(empty, 1) = (%q, %v), want (empty, true)", val, ok)
+		}
+	})
+
+	t.Run("nil userKey", func(t *testing.T) {
+		sl := NewSkipList()
+		sl.Put(keys.InternalKey{UserKey: nil, Seqno: 1, Kind: keys.InternalKeyKindPut}, []byte("nil-key"))
+
+		val, ok := sl.Get(nil, 1)
+		if !ok || string(val) != "nil-key" {
+			t.Errorf("Get(nil, 1) = (%q, %v), want (nil-key, true)", val, ok)
+		}
+	})
+
+	t.Run("empty value", func(t *testing.T) {
+		sl := NewSkipList()
+		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 1, Kind: keys.InternalKeyKindPut}, []byte{})
+
+		val, ok := sl.Get([]byte("k"), 1)
+		if !ok {
+			t.Error("Get(k, 1): want found, got not found")
+		}
+		if len(val) != 0 {
+			t.Errorf("Get(k, 1) value = %q, want empty", val)
+		}
+	})
+
+	t.Run("nil value", func(t *testing.T) {
+		sl := NewSkipList()
+		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 1, Kind: keys.InternalKeyKindPut}, nil)
+
+		val, ok := sl.Get([]byte("k"), 1)
+		if !ok {
+			t.Error("Get(k, 1): want found, got not found")
+		}
+		if len(val) != 0 {
+			t.Errorf("Get(k, 1) value = %q, want empty", val)
+		}
+	})
+
+	t.Run("binary key with null bytes", func(t *testing.T) {
+		sl := NewSkipList()
+		binKey := []byte{0x00, 0x01, 0x00, 0xFF}
+		sl.Put(keys.InternalKey{UserKey: binKey, Seqno: 1, Kind: keys.InternalKeyKindPut}, []byte("binary"))
+
+		val, ok := sl.Get(binKey, 1)
+		if !ok || string(val) != "binary" {
+			t.Errorf("Get(binary, 1) = (%q, %v), want (binary, true)", val, ok)
+		}
+	})
+
+	t.Run("max seqno", func(t *testing.T) {
+		sl := NewSkipList()
+		maxSeq := ^uint64(0) // math.MaxUint64
+		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: maxSeq, Kind: keys.InternalKeyKindPut}, []byte("max"))
+
+		val, ok := sl.Get([]byte("k"), maxSeq)
+		if !ok || string(val) != "max" {
+			t.Errorf("Get(k, max) = (%q, %v), want (max, true)", val, ok)
+		}
+	})
+
+	t.Run("seqno 0", func(t *testing.T) {
+		sl := NewSkipList()
+		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 0, Kind: keys.InternalKeyKindPut}, []byte("zero"))
+
+		val, ok := sl.Get([]byte("k"), 0)
+		if !ok || string(val) != "zero" {
+			t.Errorf("Get(k, 0) = (%q, %v), want (zero, true)", val, ok)
+		}
+	})
+}
+
+func TestGet_ValueIsolation(t *testing.T) {
+	// Get should return a copy of the value, not a reference to internal storage.
+	sl := NewSkipList()
+	sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 1, Kind: keys.InternalKeyKindPut}, []byte("original"))
+
+	val, _ := sl.Get([]byte("k"), 1)
+	original := string(val)
+
+	// Mutate the returned slice
+	val[0] = 'X'
+
+	// Get again and verify it's unchanged
+	val2, _ := sl.Get([]byte("k"), 1)
+	if string(val2) != original {
+		t.Errorf("value was mutated: got %q, want %q", val2, original)
+	}
+}
+
+func TestGet_Concurrent(t *testing.T) {
+	// Concurrent Gets while Puts are happening should not panic or corrupt data.
+	sl := NewSkipList()
+	const iterations = 500
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	// Writer: continuously insert versions of "key"
+	go func() {
+		defer wg.Done()
+		for i := range iterations {
+			sl.Put(keys.InternalKey{
+				UserKey: []byte("key"),
+				Seqno:   uint64(i), //nolint:gosec // test code
+				Kind:    keys.InternalKeyKindPut,
+			}, []byte("val"))
+		}
+	}()
+
+	// Reader 1: continuously Get "key"
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			_, _ = sl.Get([]byte("key"), 1000)
+		}
+	}()
+
+	// Reader 2: continuously Get a non-existent key
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			_, _ = sl.Get([]byte("nonexistent"), 1000)
+		}
+	}()
+
+	wg.Wait()
+
+	// Verify final state
+	if sl.Len() != iterations {
+		t.Errorf("Len() = %d, want %d", sl.Len(), iterations)
 	}
 }
 
