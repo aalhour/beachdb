@@ -9,10 +9,20 @@ import (
 	"github.com/aalhour/beachdb/internal/keys"
 )
 
+// skipNode defines the internal node type in the SkipList
 type skipNode struct {
 	key   keys.InternalKey
 	value []byte
 	next  []*skipNode
+}
+
+// memSize returns an estimation for the skipNode's size in memory
+func (n *skipNode) memSize() int {
+	return len(n.key.UserKey) +
+		len(n.value) +
+		8 + 1 + // seqno + kind
+		len(n.next)*8 + // pointer slice
+		24 // struct overhead estimate
 }
 
 // SkipList is a probabilistic data structure that provides
@@ -21,7 +31,7 @@ type SkipList struct {
 	mu       sync.RWMutex // Reader-writer lock
 	rng      *rand.Rand   // Random number generator for level selection
 	head     *skipNode    // Sentinel head node (never holds data)
-	maxLevel int          // Current highest level in use
+	maxLevel int          // Maximum possible level (typically 12-20)
 	level    int          // Current highest level in use
 	length   int          // Number of entries
 	size     int64        // Approximate memory usage in bytes
@@ -29,8 +39,9 @@ type SkipList struct {
 
 // NewSkipList creates a new SkipList struct pointer and returns it
 func NewSkipList() *SkipList {
-	seed1 := uint64(time.Now().UnixNano())
-	seed2 := uint64(time.Now().UnixNano() ^ 0xDEADBEEF) // mix it up a bit
+	// Use UnixNano as seed; convert via bit cast to avoid overflow lint
+	seed1 := uint64(time.Now().UnixNano()) //nolint:gosec // seed doesn't need to be secure
+	seed2 := seed1 ^ 0xDEADBEEF            // mix it up a bit
 
 	const maxLevel = 12
 
@@ -40,14 +51,14 @@ func NewSkipList() *SkipList {
 			next: make([]*skipNode, maxLevel), // 12 nil pointers
 		},
 		level: 1,
-		rng:   rand.New(rand.NewPCG(seed1, seed2)),
+		rng:   rand.New(rand.NewPCG(seed1, seed2)), //nolint:gosec // crypto/rand unnecessary for skip list levels
 	}
 }
 
-// randomLevel returns a random level for a new node
+// randomLevel returns a random level for a new node.
+// Returns a level between 1 and maxLevel (inclusive), where the probability
+// decreases geometrically: ~75% level 1, ~18.75% level 2, ~4.7% level 3, etc.
 func (sl *SkipList) randomLevel() int {
-	// Returns a random level between 1 and sl.maxLevel (inclusive),
-	// where the probability decreases geometrically with each higher level.
 	level := 1
 	for level < sl.maxLevel {
 		if sl.rng.Float64() >= 0.25 {
@@ -58,31 +69,103 @@ func (sl *SkipList) randomLevel() int {
 	return level
 }
 
-// findPredecessors iterates the levels in reverse order and returns an array
-// of nodes where `preds[i]“ is the last node at level `i` whose key is <
-// of the target key. The node we're looking for (or where to insert) is at:
-// `preds[0].next[0]`
+// findPredecessors returns the predecessor node for each level where a new node
+// with the given key should be inserted.
+//
+// Returns: preds[i] = the rightmost node at level i whose key < target key.
+//
+// After calling this:
+//   - preds[0].next[0] is the first node >= target (or nil if target is largest)
+//   - To insert: wire newNode.next[i] = preds[i].next[i], then preds[i].next[i] = newNode
+//
+// Example: list has [A] -> [C] -> [E], inserting "D":
+//
+//	preds[0] = C  (C < D, but C.next[0] = E >= D)
+//	After insert: [A] -> [C] -> [D] -> [E]
 func (sl *SkipList) findPredecessors(key keys.InternalKey) []*skipNode {
-	// Initialize preds slice
 	preds := make([]*skipNode, sl.maxLevel)
 
-	// Assign head as the default pred for all levels
+	// Default all levels to head (handles empty list and levels above current height)
 	for i := range preds {
 		preds[i] = sl.head
 	}
-	current := sl.head
 
-	// Start at previous level and iterate backwards
+	// Start at the highest level and work down.
+	// At each level, move right until the next node is >= target key.
+	// The "current" pointer carries forward to lower levels (optimization:
+	// we don't restart from head, we continue from where we dropped down).
+	current := sl.head
 	for level := sl.maxLevel - 1; level >= 0; level-- {
-		// Keep going forward in the next pointers as long as there are
-		// nodes and they are < the target key
+		// Advance right while: (1) next node exists, AND (2) next node's key < target
 		for current.next[level] != nil && current.next[level].key.Compare(key) < 0 {
 			current = current.next[level]
 		}
-
-		// Found the predecessor and it could be nil!
+		// current is now the rightmost node at this level with key < target
 		preds[level] = current
 	}
 
 	return preds
+}
+
+// Put inserts a key-value pair into the SkipList.
+// In a memtable, we always insert (never update in place) because different
+// sequence numbers represent different versions of the same user key.
+func (sl *SkipList) Put(key keys.InternalKey, value []byte) {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+
+	// Find where to insert at each level
+	preds := sl.findPredecessors(key)
+
+	// Pick a random level for the new node
+	nodeLevel := sl.randomLevel()
+
+	// If new node is taller than current list height, update list level
+	if nodeLevel > sl.level {
+		// Higher levels have no predecessors yet, so point them to head
+		for i := sl.level; i < nodeLevel; i++ {
+			preds[i] = sl.head
+		}
+		sl.level = nodeLevel
+	}
+
+	// Create the new node (copy value to avoid caller mutation)
+	valueCopy := append([]byte(nil), value...)
+	newNode := &skipNode{
+		key:   key,
+		value: valueCopy,
+		next:  make([]*skipNode, nodeLevel),
+	}
+
+	// Wire up forward pointers at each level:
+	//   newNode.next[i] = preds[i].next[i]  (new node points to what pred pointed to)
+	//   preds[i].next[i] = newNode          (pred now points to new node)
+	for i := range nodeLevel {
+		newNode.next[i] = preds[i].next[i]
+		preds[i].next[i] = newNode
+	}
+
+	sl.length++
+	sl.size += int64(newNode.memSize())
+}
+
+// Len returns the number of entries in the skip list.
+func (sl *SkipList) Len() int {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+	return sl.length
+}
+
+// Size returns the approximate memory usage in bytes.
+func (sl *SkipList) Size() int64 {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+	return sl.size
+}
+
+// Empty returns true if the skip list has no entries.
+func (sl *SkipList) Empty() bool {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+	return sl.length == 0
 }
