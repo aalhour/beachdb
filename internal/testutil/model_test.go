@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"math"
 	"slices"
 	"testing"
 )
@@ -16,8 +17,8 @@ func TestNewModel(t *testing.T) {
 		t.Errorf("new model should have length 0, got %d", m.Len())
 	}
 
-	if m.data == nil {
-		t.Error("new model should have initialized data map")
+	if m.entries == nil {
+		t.Error("new model should have initialized entries slice")
 	}
 }
 
@@ -27,10 +28,8 @@ func TestModel_Put_Get(t *testing.T) {
 	key := []byte("name")
 	value := []byte("alice")
 
-	// Put a key-value pair
 	m.Put(key, value)
 
-	// Get it back
 	got, ok := m.Get(key)
 	if !ok {
 		t.Fatal("Get returned ok=false for existing key")
@@ -40,9 +39,9 @@ func TestModel_Put_Get(t *testing.T) {
 		t.Errorf("expected value %q, got %q", value, got)
 	}
 
-	// Check length
+	// Len returns total entries
 	if m.Len() != 1 {
-		t.Errorf("expected length 1, got %d", m.Len())
+		t.Errorf("expected 1 entry, got %d", m.Len())
 	}
 }
 
@@ -65,7 +64,6 @@ func TestModel_Put_ValueCopied(t *testing.T) {
 	key := []byte("key")
 	value := []byte("original")
 
-	// Put the value
 	m.Put(key, value)
 
 	// Mutate the original value
@@ -121,7 +119,6 @@ func TestModel_Delete(t *testing.T) {
 	key := []byte("key")
 	value := []byte("value")
 
-	// Put a value
 	m.Put(key, value)
 
 	// Verify it exists
@@ -131,31 +128,39 @@ func TestModel_Delete(t *testing.T) {
 	}
 
 	if m.Len() != 1 {
-		t.Errorf("expected length 1 before delete, got %d", m.Len())
+		t.Errorf("expected 1 entry before delete, got %d", m.Len())
 	}
 
-	// Delete it
+	// Delete adds a tombstone
 	m.Delete(key)
 
-	// Verify it's gone
+	// Key should no longer be visible via Get
 	_, ok = m.Get(key)
 	if ok {
-		t.Error("key should not exist after delete")
+		t.Error("key should not be visible after delete (tombstone)")
 	}
 
-	if m.Len() != 0 {
-		t.Errorf("expected length 0 after delete, got %d", m.Len())
+	// But Len() counts all entries (put + tombstone)
+	if m.Len() != 2 {
+		t.Errorf("expected 2 entries after delete (put + tombstone), got %d", m.Len())
 	}
 }
 
 func TestModel_Delete_NonExistent(t *testing.T) {
 	m := NewModel()
 
-	// Deleting non-existent key should not panic
+	// Deleting non-existent key adds a tombstone
 	m.Delete([]byte("nonexistent"))
 
-	if m.Len() != 0 {
-		t.Errorf("expected length 0, got %d", m.Len())
+	// Tombstone is still an entry
+	if m.Len() != 1 {
+		t.Errorf("expected 1 entry (tombstone), got %d", m.Len())
+	}
+
+	// Key should not be found
+	_, ok := m.Get([]byte("nonexistent"))
+	if ok {
+		t.Error("deleted non-existent key should not be found")
 	}
 }
 
@@ -166,7 +171,6 @@ func TestModel_Overwrite(t *testing.T) {
 	value1 := []byte("value1")
 	value2 := []byte("value2")
 
-	// Put first value
 	m.Put(key, value1)
 
 	got, _ := m.Get(key)
@@ -174,7 +178,7 @@ func TestModel_Overwrite(t *testing.T) {
 		t.Errorf("expected %q, got %q", value1, got)
 	}
 
-	// Overwrite with second value
+	// "Overwrite" adds a new entry with higher seqno
 	m.Put(key, value2)
 
 	got, _ = m.Get(key)
@@ -182,9 +186,9 @@ func TestModel_Overwrite(t *testing.T) {
 		t.Errorf("expected %q, got %q", value2, got)
 	}
 
-	// Length should still be 1
-	if m.Len() != 1 {
-		t.Errorf("expected length 1 after overwrite, got %d", m.Len())
+	// Len counts all entries (both versions exist)
+	if m.Len() != 2 {
+		t.Errorf("expected 2 entries after overwrite, got %d", m.Len())
 	}
 }
 
@@ -204,7 +208,7 @@ func TestModel_Keys(t *testing.T) {
 
 	keys = m.Keys()
 	if len(keys) != 3 {
-		t.Errorf("expected 3 keys, got %d", len(keys))
+		t.Errorf("expected 3 unique keys, got %d", len(keys))
 	}
 
 	// Verify all keys are present (order doesn't matter)
@@ -221,10 +225,32 @@ func TestModel_Keys(t *testing.T) {
 	}
 }
 
-func TestModel_EmptyKeyValue(t *testing.T) {
+func TestModel_Keys_Unique(t *testing.T) {
 	m := NewModel()
 
+	// Add multiple versions of same key
+	m.Put([]byte("key"), []byte("v1"))
+	m.Put([]byte("key"), []byte("v2"))
+	m.Put([]byte("key"), []byte("v3"))
+
+	keys := m.Keys()
+	if len(keys) != 1 {
+		t.Errorf("Keys() should return unique keys; expected 1, got %d", len(keys))
+	}
+
+	if string(keys[0]) != "key" {
+		t.Errorf("expected key 'key', got %q", keys[0])
+	}
+
+	// But Len() counts all entries
+	if m.Len() != 3 {
+		t.Errorf("expected 3 entries, got %d", m.Len())
+	}
+}
+
+func TestModel_EmptyKeyValue(t *testing.T) {
 	t.Run("empty key", func(t *testing.T) {
+		m := NewModel()
 		m.Put([]byte{}, []byte("value"))
 
 		got, ok := m.Get([]byte{})
@@ -237,6 +263,7 @@ func TestModel_EmptyKeyValue(t *testing.T) {
 	})
 
 	t.Run("empty value", func(t *testing.T) {
+		m := NewModel()
 		m.Put([]byte("key"), []byte{})
 
 		got, ok := m.Get([]byte("key"))
@@ -249,6 +276,7 @@ func TestModel_EmptyKeyValue(t *testing.T) {
 	})
 
 	t.Run("empty key and value", func(t *testing.T) {
+		m := NewModel()
 		m.Put([]byte{}, []byte{})
 
 		got, ok := m.Get([]byte{})
@@ -289,23 +317,23 @@ func TestModel_MultipleOperations(t *testing.T) {
 	m.Put([]byte("c"), []byte("3"))
 
 	if m.Len() != 3 {
-		t.Errorf("expected length 3, got %d", m.Len())
+		t.Errorf("expected 3 entries, got %d", m.Len())
 	}
 
-	m.Delete([]byte("b"))
+	m.Delete([]byte("b")) // Adds tombstone
 
-	if m.Len() != 2 {
-		t.Errorf("expected length 2 after delete, got %d", m.Len())
+	if m.Len() != 4 {
+		t.Errorf("expected 4 entries after delete, got %d", m.Len())
 	}
 
 	m.Put([]byte("d"), []byte("4"))
-	m.Put([]byte("a"), []byte("updated"))
+	m.Put([]byte("a"), []byte("updated")) // Second version of "a"
 
-	if m.Len() != 3 {
-		t.Errorf("expected length 3, got %d", m.Len())
+	if m.Len() != 6 {
+		t.Errorf("expected 6 entries, got %d", m.Len())
 	}
 
-	// Verify final state
+	// Verify final visible state
 	got, _ := m.Get([]byte("a"))
 	if string(got) != "updated" {
 		t.Errorf("expected 'updated', got %q", got)
@@ -313,7 +341,7 @@ func TestModel_MultipleOperations(t *testing.T) {
 
 	_, ok := m.Get([]byte("b"))
 	if ok {
-		t.Error("key 'b' should not exist")
+		t.Error("key 'b' should not be visible (tombstoned)")
 	}
 
 	got, _ = m.Get([]byte("c"))
@@ -324,5 +352,215 @@ func TestModel_MultipleOperations(t *testing.T) {
 	got, _ = m.Get([]byte("d"))
 	if string(got) != "4" {
 		t.Errorf("expected '4', got %q", got)
+	}
+
+	// Keys should return unique visible keys (excluding tombstoned)
+	// Note: Keys() returns all unique keys that have entries, even if tombstoned
+	keys := m.Keys()
+	if len(keys) != 4 {
+		t.Errorf("expected 4 unique keys, got %d", len(keys))
+	}
+}
+
+// --- MVCC / Seqno-aware tests ---
+
+func TestModel_PutAt_GetAt(t *testing.T) {
+	m := NewModel()
+
+	key := []byte("key")
+
+	// Write at seqno 1
+	m.PutAt(key, []byte("v1"), 1)
+
+	// Write at seqno 3
+	m.PutAt(key, []byte("v3"), 3)
+
+	// Write at seqno 2 (out of order, simulating concurrent writes)
+	m.PutAt(key, []byte("v2"), 2)
+
+	// GetAt seqno 1 should return v1
+	got, ok := m.GetAt(key, 1)
+	if !ok {
+		t.Fatal("GetAt(1) should find v1")
+	}
+	if string(got) != "v1" {
+		t.Errorf("GetAt(1): expected 'v1', got %q", got)
+	}
+
+	// GetAt seqno 2 should return v2 (newest <= 2)
+	got, ok = m.GetAt(key, 2)
+	if !ok {
+		t.Fatal("GetAt(2) should find v2")
+	}
+	if string(got) != "v2" {
+		t.Errorf("GetAt(2): expected 'v2', got %q", got)
+	}
+
+	// GetAt seqno 3 should return v3
+	got, ok = m.GetAt(key, 3)
+	if !ok {
+		t.Fatal("GetAt(3) should find v3")
+	}
+	if string(got) != "v3" {
+		t.Errorf("GetAt(3): expected 'v3', got %q", got)
+	}
+
+	// GetAt seqno 100 should still return v3 (newest <= 100)
+	got, ok = m.GetAt(key, 100)
+	if !ok {
+		t.Fatal("GetAt(100) should find v3")
+	}
+	if string(got) != "v3" {
+		t.Errorf("GetAt(100): expected 'v3', got %q", got)
+	}
+
+	// GetAt seqno 0 should find nothing
+	_, ok = m.GetAt(key, 0)
+	if ok {
+		t.Error("GetAt(0) should not find anything")
+	}
+}
+
+func TestModel_DeleteAt_GetAt(t *testing.T) {
+	m := NewModel()
+
+	key := []byte("key")
+
+	// Write at seqno 1
+	m.PutAt(key, []byte("v1"), 1)
+
+	// Delete at seqno 2
+	m.DeleteAt(key, 2)
+
+	// Write again at seqno 3 (resurrection)
+	m.PutAt(key, []byte("v3"), 3)
+
+	// GetAt seqno 1 should return v1
+	got, ok := m.GetAt(key, 1)
+	if !ok {
+		t.Fatal("GetAt(1) should find v1")
+	}
+	if string(got) != "v1" {
+		t.Errorf("GetAt(1): expected 'v1', got %q", got)
+	}
+
+	// GetAt seqno 2 should return nothing (tombstone)
+	_, ok = m.GetAt(key, 2)
+	if ok {
+		t.Error("GetAt(2) should not find anything (tombstone)")
+	}
+
+	// GetAt seqno 3 should return v3 (resurrected)
+	got, ok = m.GetAt(key, 3)
+	if !ok {
+		t.Fatal("GetAt(3) should find v3")
+	}
+	if string(got) != "v3" {
+		t.Errorf("GetAt(3): expected 'v3', got %q", got)
+	}
+}
+
+func TestModel_GetAt_SeqnoVisibility(t *testing.T) {
+	m := NewModel()
+
+	// Simulate writes at specific seqnos
+	m.PutAt([]byte("a"), []byte("a1"), 1)
+	m.PutAt([]byte("b"), []byte("b2"), 2)
+	m.PutAt([]byte("a"), []byte("a3"), 3)
+	m.DeleteAt([]byte("b"), 4)
+	m.PutAt([]byte("c"), []byte("c5"), 5)
+
+	tests := []struct {
+		key   string
+		seqno uint64
+		want  string
+		found bool
+	}{
+		{"a", 0, "", false},
+		{"a", 1, "a1", true},
+		{"a", 2, "a1", true},
+		{"a", 3, "a3", true},
+		{"a", 100, "a3", true},
+		{"b", 1, "", false},
+		{"b", 2, "b2", true},
+		{"b", 3, "b2", true},
+		{"b", 4, "", false}, // tombstone
+		{"b", 100, "", false},
+		{"c", 4, "", false},
+		{"c", 5, "c5", true},
+	}
+
+	for _, tc := range tests {
+		got, ok := m.GetAt([]byte(tc.key), tc.seqno)
+		if ok != tc.found {
+			t.Errorf("GetAt(%q, %d): found=%v, want %v", tc.key, tc.seqno, ok, tc.found)
+			continue
+		}
+		if tc.found && string(got) != tc.want {
+			t.Errorf("GetAt(%q, %d): got %q, want %q", tc.key, tc.seqno, got, tc.want)
+		}
+	}
+}
+
+func TestModel_Put_UsesMaxSeqno(t *testing.T) {
+	m := NewModel()
+
+	// Put without seqno should use MaxUint64
+	m.Put([]byte("key"), []byte("value"))
+
+	// Verify the entry has MaxUint64 seqno
+	if m.entries[0].seqno != math.MaxUint64 {
+		t.Errorf("Put should use MaxUint64 seqno, got %d", m.entries[0].seqno)
+	}
+
+	// Should be visible via Get() which uses MaxUint64
+	got, ok := m.Get([]byte("key"))
+	if !ok {
+		t.Error("Put should be visible via Get()")
+	}
+	if string(got) != "value" {
+		t.Errorf("expected 'value', got %q", got)
+	}
+
+	// Should NOT be visible at small seqno (MaxUint64 > 1)
+	_, ok = m.GetAt([]byte("key"), 1)
+	if ok {
+		t.Error("Put with MaxUint64 seqno should NOT be visible at seqno 1")
+	}
+
+	// Should be visible at MaxUint64
+	got, ok = m.GetAt([]byte("key"), math.MaxUint64)
+	if !ok {
+		t.Error("Put should be visible at seqno MaxUint64")
+	}
+	if string(got) != "value" {
+		t.Errorf("expected 'value', got %q", got)
+	}
+}
+
+func TestModel_Delete_UsesMaxSeqno(t *testing.T) {
+	m := NewModel()
+
+	m.PutAt([]byte("key"), []byte("value"), 1)
+	m.Delete([]byte("key"))
+
+	// Verify the tombstone has MaxUint64 seqno
+	if m.entries[1].seqno != math.MaxUint64 {
+		t.Errorf("Delete should use MaxUint64 seqno, got %d", m.entries[1].seqno)
+	}
+
+	// At seqno 1, only the put is visible (tombstone at MaxUint64 is "too new")
+	got, ok := m.GetAt([]byte("key"), 1)
+	if !ok {
+		t.Error("key should be visible at seqno 1 (before tombstone)")
+	}
+	if string(got) != "value" {
+		t.Errorf("expected 'value', got %q", got)
+	}
+
+	// Via Get() (which uses MaxUint64), the tombstone wins
+	_, ok = m.Get([]byte("key"))
+	if ok {
+		t.Error("key should be deleted via Get() (tombstone at MaxUint64)")
 	}
 }

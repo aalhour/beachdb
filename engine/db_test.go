@@ -902,19 +902,27 @@ func TestDB_CrashLoop(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Verify: for every key in model, DB should have same value
+	// Verify: for every key in model, DB should have same value (or both not found)
 	modelKeys := model.Keys()
-	t.Logf("Verifying %d keys after %d crash cycles", len(modelKeys), numCycles)
+	t.Logf("Verifying %d unique keys after %d crash cycles", len(modelKeys), numCycles)
 
 	for _, key := range modelKeys {
-		expectedValue, ok := model.Get(key)
-		if !ok {
-			t.Fatalf("model lost key %q", key)
+		expectedValue, modelHasKey := model.Get(key)
+		actualValue, dbErr := db.Get(ctx, key)
+
+		if !modelHasKey {
+			// Key was deleted in model (tombstoned) — DB should also return not found
+			if dbErr == nil {
+				t.Errorf("key %q: deleted in model but found in DB with value %x", key, actualValue)
+			} else if !errors.Is(dbErr, ErrKeyNotFound) {
+				t.Errorf("key %q: deleted in model, DB returned unexpected error: %v", key, dbErr)
+			}
+			continue
 		}
 
-		actualValue, err := db.Get(ctx, key)
-		if err != nil {
-			t.Errorf("key %q: expected in DB but got error: %v", key, err)
+		// Key exists in model — DB should have same value
+		if dbErr != nil {
+			t.Errorf("key %q: expected in DB but got error: %v", key, dbErr)
 			continue
 		}
 
@@ -926,4 +934,173 @@ func TestDB_CrashLoop(t *testing.T) {
 
 	// Also verify DB doesn't have extra keys
 	// (This requires iterating DB, which v1 doesn't support — skip for now)
+}
+
+func TestDB_OverwriteReplay(t *testing.T) {
+	// Explicitly test that overwriting a key survives crash/replay
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Phase 1: Write initial value
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+
+	key := []byte("overwrite-test-key")
+	value1 := []byte("first-value")
+	value2 := []byte("second-value")
+	value3 := []byte("third-value-final")
+
+	if err := db.Put(ctx, key, value1); err != nil {
+		t.Fatalf("Put value1 failed: %v", err)
+	}
+
+	// Phase 2: Overwrite with second value, close and reopen
+	if err := db.Put(ctx, key, value2); err != nil {
+		t.Fatalf("Put value2 failed: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close after value2 failed: %v", err)
+	}
+
+	db, err = Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after value2 failed: %v", err)
+	}
+
+	// Verify value2 is there
+	got, err := db.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get after reopen 1 failed: %v", err)
+	}
+	if !slices.Equal(got, value2) {
+		t.Errorf("after reopen 1: expected %q, got %q", value2, got)
+	}
+
+	// Phase 3: Overwrite again, close and reopen
+	if err := db.Put(ctx, key, value3); err != nil {
+		t.Fatalf("Put value3 failed: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close after value3 failed: %v", err)
+	}
+
+	db, err = Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after value3 failed: %v", err)
+	}
+	defer db.Close()
+
+	// Verify final value is there
+	got, err = db.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get after reopen 2 failed: %v", err)
+	}
+	if !slices.Equal(got, value3) {
+		t.Errorf("after reopen 2: expected %q, got %q", value3, got)
+	}
+}
+
+func TestDB_CrashRecovery_WithMemtable(t *testing.T) {
+	// Comprehensive crash recovery test covering all memtable semantics:
+	// - Write data, close, reopen → data is there
+	// - Sequence numbers are restored from WAL
+	// - Overwrites replay correctly
+	// - Deletes replay correctly
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Phase 1: Initial writes with overwrites and deletes
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+
+	// Write key1 with multiple overwrites
+	if err := db.Put(ctx, []byte("key1"), []byte("v1-initial")); err != nil {
+		t.Fatalf("Put key1 v1 failed: %v", err)
+	}
+	if err := db.Put(ctx, []byte("key1"), []byte("v1-overwrite")); err != nil {
+		t.Fatalf("Put key1 v2 failed: %v", err)
+	}
+
+	// Write key2, then delete it
+	if err := db.Put(ctx, []byte("key2"), []byte("v2-will-delete")); err != nil {
+		t.Fatalf("Put key2 failed: %v", err)
+	}
+	if err := db.Delete(ctx, []byte("key2")); err != nil {
+		t.Fatalf("Delete key2 failed: %v", err)
+	}
+
+	// Write key3 normally
+	if err := db.Put(ctx, []byte("key3"), []byte("v3-normal")); err != nil {
+		t.Fatalf("Put key3 failed: %v", err)
+	}
+
+	// Write key4, delete, then resurrect
+	if err := db.Put(ctx, []byte("key4"), []byte("v4-first")); err != nil {
+		t.Fatalf("Put key4 v1 failed: %v", err)
+	}
+	if err := db.Delete(ctx, []byte("key4")); err != nil {
+		t.Fatalf("Delete key4 failed: %v", err)
+	}
+	if err := db.Put(ctx, []byte("key4"), []byte("v4-resurrected")); err != nil {
+		t.Fatalf("Put key4 v2 failed: %v", err)
+	}
+
+	seqnoBeforeClose := db.seqno
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Phase 2: Reopen and verify all state is restored
+	db, err = Open(dir)
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	defer db.Close()
+
+	// Verify sequence number restored
+	if db.seqno != seqnoBeforeClose {
+		t.Errorf("seqno after replay = %d, want %d", db.seqno, seqnoBeforeClose)
+	}
+
+	// Verify key1: should have overwritten value
+	got, err := db.Get(ctx, []byte("key1"))
+	if err != nil {
+		t.Errorf("Get key1 failed: %v", err)
+	} else if !slices.Equal(got, []byte("v1-overwrite")) {
+		t.Errorf("key1: expected %q, got %q", "v1-overwrite", got)
+	}
+
+	// Verify key2: should be deleted
+	_, err = db.Get(ctx, []byte("key2"))
+	if !errors.Is(err, ErrKeyNotFound) {
+		t.Errorf("key2 should be deleted, got err=%v", err)
+	}
+
+	// Verify key3: should exist normally
+	got, err = db.Get(ctx, []byte("key3"))
+	if err != nil {
+		t.Errorf("Get key3 failed: %v", err)
+	} else if !slices.Equal(got, []byte("v3-normal")) {
+		t.Errorf("key3: expected %q, got %q", "v3-normal", got)
+	}
+
+	// Verify key4: should be resurrected
+	got, err = db.Get(ctx, []byte("key4"))
+	if err != nil {
+		t.Errorf("Get key4 failed: %v", err)
+	} else if !slices.Equal(got, []byte("v4-resurrected")) {
+		t.Errorf("key4: expected %q, got %q", "v4-resurrected", got)
+	}
+
+	// Verify new writes get correct seqno
+	if err := db.Put(ctx, []byte("key5"), []byte("v5-new")); err != nil {
+		t.Fatalf("Put key5 failed: %v", err)
+	}
+	if db.seqno != seqnoBeforeClose+1 {
+		t.Errorf("seqno after new write = %d, want %d", db.seqno, seqnoBeforeClose+1)
+	}
 }
