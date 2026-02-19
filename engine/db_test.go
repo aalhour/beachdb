@@ -11,10 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aalhour/beachdb/internal/memtable"
 	"github.com/aalhour/beachdb/internal/testutil"
 )
 
-func TestDBOpen(t *testing.T) {
+func TestDB_Open(t *testing.T) {
 	tests := []struct {
 		name    string
 		opts    []Option
@@ -76,7 +77,7 @@ func TestDBOpen(t *testing.T) {
 	}
 }
 
-func TestDBPutGet(t *testing.T) {
+func TestDB_PutGet(t *testing.T) {
 	tests := []struct {
 		name    string
 		key     []byte
@@ -142,7 +143,7 @@ func TestDBPutGet(t *testing.T) {
 	}
 }
 
-func TestDBGetKeyNotFound(t *testing.T) {
+func TestDB_GetKeyNotFound(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)
 	if err != nil {
@@ -159,7 +160,7 @@ func TestDBGetKeyNotFound(t *testing.T) {
 	}
 }
 
-func TestDBDelete(t *testing.T) {
+func TestDB_Delete(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)
 	if err != nil {
@@ -199,7 +200,7 @@ func TestDBDelete(t *testing.T) {
 	}
 }
 
-func TestDBWrite(t *testing.T) {
+func TestDB_Write(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)
 	if err != nil {
@@ -246,7 +247,7 @@ func TestDBWrite(t *testing.T) {
 	}
 }
 
-func TestDBClose(t *testing.T) {
+func TestDB_Close(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)
 	if err != nil {
@@ -266,7 +267,7 @@ func TestDBClose(t *testing.T) {
 	}
 }
 
-func TestDBCloseNilDB(t *testing.T) {
+func TestDB_CloseNilDB(t *testing.T) {
 	var db *DB
 	err := db.Close()
 	if !errors.Is(err, ErrDBClosed) {
@@ -274,7 +275,7 @@ func TestDBCloseNilDB(t *testing.T) {
 	}
 }
 
-func TestDBContextCancellation(t *testing.T) {
+func TestDB_ContextCancellation(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)
 	if err != nil {
@@ -313,7 +314,7 @@ func TestDBContextCancellation(t *testing.T) {
 	}
 }
 
-func TestDBContextDeadline(t *testing.T) {
+func TestDB_ContextDeadline(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)
 	if err != nil {
@@ -332,7 +333,7 @@ func TestDBContextDeadline(t *testing.T) {
 	}
 }
 
-func TestDBConcurrentWrites(t *testing.T) {
+func TestDB_ConcurrentWrites(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)
 	if err != nil {
@@ -352,7 +353,9 @@ func TestDBConcurrentWrites(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := range numOpsPerGoroutine {
+				//nolint:gosec // G115: test code with small bounded values
 				key := []byte("key_" + string(rune(id)) + "_" + string(rune(j)))
+				//nolint:gosec // G115: test code with small bounded values
 				value := []byte("value_" + string(rune(id)) + "_" + string(rune(j)))
 				if err := db.Put(ctx, key, value); err != nil {
 					t.Errorf("goroutine %d: failed to put: %v", id, err)
@@ -365,6 +368,7 @@ func TestDBConcurrentWrites(t *testing.T) {
 
 	// Verify that all writes succeeded by checking a few keys
 	for i := range numGoroutines {
+		//nolint:gosec // G115: test code with small bounded values
 		key := []byte("key_" + string(rune(i)) + "_" + string(rune(0)))
 		_, err := db.Get(ctx, key)
 		if err != nil {
@@ -373,7 +377,7 @@ func TestDBConcurrentWrites(t *testing.T) {
 	}
 }
 
-func TestDBConcurrentReads(t *testing.T) {
+func TestDB_ConcurrentReads(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)
 	if err != nil {
@@ -413,21 +417,25 @@ func TestDBConcurrentReads(t *testing.T) {
 	wg.Wait()
 }
 
-func TestDBApplyBatch(t *testing.T) {
+func TestDB_ApplyBatch(t *testing.T) {
+	// Test struct: expected keys that should exist, and keys that should NOT exist
 	tests := []struct {
-		name     string
-		batch    *Batch
-		expected map[string][]byte
+		name        string
+		batch       *Batch
+		expectExist map[string][]byte // keys that should exist with these values
+		expectGone  []string          // keys that should NOT exist (deleted)
 	}{
 		{
-			name:     "nil batch",
-			batch:    nil,
-			expected: map[string][]byte{},
+			name:        "nil batch",
+			batch:       nil,
+			expectExist: map[string][]byte{},
+			expectGone:  []string{},
 		},
 		{
-			name:     "empty batch",
-			batch:    NewBatch(),
-			expected: map[string][]byte{},
+			name:        "empty batch",
+			batch:       NewBatch(),
+			expectExist: map[string][]byte{},
+			expectGone:  []string{},
 		},
 		{
 			name: "batch with puts",
@@ -437,19 +445,21 @@ func TestDBApplyBatch(t *testing.T) {
 				b.Put([]byte("key2"), []byte("value2"))
 				return b
 			}(),
-			expected: map[string][]byte{
+			expectExist: map[string][]byte{
 				"key1": []byte("value1"),
 				"key2": []byte("value2"),
 			},
+			expectGone: []string{},
 		},
 		{
-			name: "batch with deletes",
+			name: "batch with deletes on non-existent key",
 			batch: func() *Batch {
 				b := NewBatch()
 				b.Delete([]byte("key1"))
 				return b
 			}(),
-			expected: map[string][]byte{},
+			expectExist: map[string][]byte{},
+			expectGone:  []string{"key1"},
 		},
 		{
 			name: "batch with put then delete same key",
@@ -459,7 +469,8 @@ func TestDBApplyBatch(t *testing.T) {
 				b.Delete([]byte("key1"))
 				return b
 			}(),
-			expected: map[string][]byte{},
+			expectExist: map[string][]byte{},
+			expectGone:  []string{"key1"}, // tombstone hides the put
 		},
 		{
 			name: "batch with mixed operations",
@@ -471,45 +482,43 @@ func TestDBApplyBatch(t *testing.T) {
 				b.Put([]byte("key3"), []byte("value3"))
 				return b
 			}(),
-			expected: map[string][]byte{
+			expectExist: map[string][]byte{
 				"key2": []byte("value2"),
 				"key3": []byte("value3"),
 			},
+			expectGone: []string{"key1"},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			db := &DB{mem: make(map[string][]byte)}
+			db := &DB{mem: memtable.NewSkipList(), seqno: 0}
 			db.applyBatch(test.batch)
 
-			// Check that the in-memory map matches expected
-			if len(db.mem) != len(test.expected) {
-				t.Errorf("expected map size %d, got %d", len(test.expected), len(db.mem))
-			}
-
-			for key, expectedValue := range test.expected {
-				gotValue, ok := db.mem[key]
-				if !ok {
-					t.Errorf("expected key %q to exist in map", key)
+			// Verify keys that should exist
+			for key, expectedValue := range test.expectExist {
+				gotValue, found := db.mem.Get([]byte(key), db.seqno)
+				if !found {
+					t.Errorf("expected key %q to exist", key)
 					continue
 				}
 				if !slices.Equal(gotValue, expectedValue) {
-					t.Errorf("for key %q: expected value %v, got %v", key, expectedValue, gotValue)
+					t.Errorf("key %q: expected value %v, got %v", key, expectedValue, gotValue)
 				}
 			}
 
-			// Check that no unexpected keys exist
-			for key := range db.mem {
-				if _, ok := test.expected[key]; !ok {
-					t.Errorf("unexpected key %q in map", key)
+			// Verify keys that should NOT exist (deleted or never added)
+			for _, key := range test.expectGone {
+				_, found := db.mem.Get([]byte(key), db.seqno)
+				if found {
+					t.Errorf("key %q should not exist (was deleted or never added)", key)
 				}
 			}
 		})
 	}
 }
 
-func TestDBWithSyncOption(t *testing.T) {
+func TestDB_WithSyncOption(t *testing.T) {
 	tests := []struct {
 		name       string
 		opts       []Option
@@ -548,7 +557,7 @@ func TestDBWithSyncOption(t *testing.T) {
 	}
 }
 
-func TestDBOverwriteValue(t *testing.T) {
+func TestDB_OverwriteValue(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)
 	if err != nil {
@@ -590,7 +599,7 @@ func TestDBOverwriteValue(t *testing.T) {
 	}
 }
 
-func TestDBPutDeleteSequence(t *testing.T) {
+func TestDB_PutDeleteSequence(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)
 	if err != nil {
@@ -634,7 +643,114 @@ func TestDBPutDeleteSequence(t *testing.T) {
 	}
 }
 
-func TestDBWALReplay(t *testing.T) {
+func TestDB_SeqnoIncrement(t *testing.T) {
+	// Verify that each write operation gets a unique, incrementing sequence number.
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// Initial seqno should be 0
+	if db.seqno != 0 {
+		t.Errorf("initial seqno = %d, want 0", db.seqno)
+	}
+
+	// First Put: seqno becomes 1
+	err = db.Put(ctx, []byte("key1"), []byte("value1"))
+	if err != nil {
+		t.Fatalf("Put 1 failed: %v", err)
+	}
+	if db.seqno != 1 {
+		t.Errorf("after Put 1: seqno = %d, want 1", db.seqno)
+	}
+
+	// Second Put: seqno becomes 2
+	err = db.Put(ctx, []byte("key2"), []byte("value2"))
+	if err != nil {
+		t.Fatalf("Put 2 failed: %v", err)
+	}
+	if db.seqno != 2 {
+		t.Errorf("after Put 2: seqno = %d, want 2", db.seqno)
+	}
+
+	// Delete: seqno becomes 3
+	err = db.Delete(ctx, []byte("key1"))
+	if err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+	if db.seqno != 3 {
+		t.Errorf("after Delete: seqno = %d, want 3", db.seqno)
+	}
+
+	// Batch with 3 ops: seqno becomes 6
+	batch := NewBatch()
+	batch.Put([]byte("key3"), []byte("value3"))
+	batch.Put([]byte("key4"), []byte("value4"))
+	batch.Delete([]byte("key2"))
+	err = db.Write(ctx, batch)
+	if err != nil {
+		t.Fatalf("Write batch failed: %v", err)
+	}
+	if db.seqno != 6 {
+		t.Errorf("after batch (3 ops): seqno = %d, want 6", db.seqno)
+	}
+}
+
+func TestDB_SeqnoPreservedAfterReplay(t *testing.T) {
+	// Verify that seqno is correctly restored after WAL replay.
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Open and write some data
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+
+	// Write 5 operations
+	for i := range 5 {
+		err = db.Put(ctx, []byte("key"), []byte("value"))
+		if err != nil {
+			t.Fatalf("Put %d failed: %v", i, err)
+		}
+	}
+	seqnoBeforeClose := db.seqno
+	if seqnoBeforeClose != 5 {
+		t.Errorf("seqno before close = %d, want 5", seqnoBeforeClose)
+	}
+
+	// Close and reopen
+	err = db.Close()
+	if err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	db2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("failed to reopen db: %v", err)
+	}
+	defer db2.Close()
+
+	// After replay, seqno should be restored
+	if db2.seqno != seqnoBeforeClose {
+		t.Errorf("seqno after replay = %d, want %d", db2.seqno, seqnoBeforeClose)
+	}
+
+	// New writes should continue from where we left off
+	err = db2.Put(ctx, []byte("key"), []byte("value"))
+	if err != nil {
+		t.Fatalf("Put after reopen failed: %v", err)
+	}
+	if db2.seqno != 6 {
+		t.Errorf("seqno after new write = %d, want 6", db2.seqno)
+	}
+}
+
+func TestDB_WALReplay(t *testing.T) {
 	dir := t.TempDir()
 
 	// Open database and write some data
@@ -703,7 +819,7 @@ func TestDBWALReplay(t *testing.T) {
 	}
 }
 
-func TestDBOpenNoExistingWAL(t *testing.T) {
+func TestDB_OpenNoExistingWAL(t *testing.T) {
 	// Test opening a database when no WAL exists yet
 	dir := t.TempDir()
 
@@ -786,19 +902,27 @@ func TestDB_CrashLoop(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Verify: for every key in model, DB should have same value
+	// Verify: for every key in model, DB should have same value (or both not found)
 	modelKeys := model.Keys()
-	t.Logf("Verifying %d keys after %d crash cycles", len(modelKeys), numCycles)
+	t.Logf("Verifying %d unique keys after %d crash cycles", len(modelKeys), numCycles)
 
 	for _, key := range modelKeys {
-		expectedValue, ok := model.Get(key)
-		if !ok {
-			t.Fatalf("model lost key %q", key)
+		expectedValue, modelHasKey := model.Get(key)
+		actualValue, dbErr := db.Get(ctx, key)
+
+		if !modelHasKey {
+			// Key was deleted in model (tombstoned) — DB should also return not found
+			if dbErr == nil {
+				t.Errorf("key %q: deleted in model but found in DB with value %x", key, actualValue)
+			} else if !errors.Is(dbErr, ErrKeyNotFound) {
+				t.Errorf("key %q: deleted in model, DB returned unexpected error: %v", key, dbErr)
+			}
+			continue
 		}
 
-		actualValue, err := db.Get(ctx, key)
-		if err != nil {
-			t.Errorf("key %q: expected in DB but got error: %v", key, err)
+		// Key exists in model — DB should have same value
+		if dbErr != nil {
+			t.Errorf("key %q: expected in DB but got error: %v", key, dbErr)
 			continue
 		}
 
@@ -810,4 +934,173 @@ func TestDB_CrashLoop(t *testing.T) {
 
 	// Also verify DB doesn't have extra keys
 	// (This requires iterating DB, which v1 doesn't support — skip for now)
+}
+
+func TestDB_OverwriteReplay(t *testing.T) {
+	// Explicitly test that overwriting a key survives crash/replay
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Phase 1: Write initial value
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+
+	key := []byte("overwrite-test-key")
+	value1 := []byte("first-value")
+	value2 := []byte("second-value")
+	value3 := []byte("third-value-final")
+
+	if err := db.Put(ctx, key, value1); err != nil {
+		t.Fatalf("Put value1 failed: %v", err)
+	}
+
+	// Phase 2: Overwrite with second value, close and reopen
+	if err := db.Put(ctx, key, value2); err != nil {
+		t.Fatalf("Put value2 failed: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close after value2 failed: %v", err)
+	}
+
+	db, err = Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after value2 failed: %v", err)
+	}
+
+	// Verify value2 is there
+	got, err := db.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get after reopen 1 failed: %v", err)
+	}
+	if !slices.Equal(got, value2) {
+		t.Errorf("after reopen 1: expected %q, got %q", value2, got)
+	}
+
+	// Phase 3: Overwrite again, close and reopen
+	if err := db.Put(ctx, key, value3); err != nil {
+		t.Fatalf("Put value3 failed: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close after value3 failed: %v", err)
+	}
+
+	db, err = Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after value3 failed: %v", err)
+	}
+	defer db.Close()
+
+	// Verify final value is there
+	got, err = db.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get after reopen 2 failed: %v", err)
+	}
+	if !slices.Equal(got, value3) {
+		t.Errorf("after reopen 2: expected %q, got %q", value3, got)
+	}
+}
+
+func TestDB_CrashRecovery_WithMemtable(t *testing.T) {
+	// Comprehensive crash recovery test covering all memtable semantics:
+	// - Write data, close, reopen → data is there
+	// - Sequence numbers are restored from WAL
+	// - Overwrites replay correctly
+	// - Deletes replay correctly
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Phase 1: Initial writes with overwrites and deletes
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+
+	// Write key1 with multiple overwrites
+	if err := db.Put(ctx, []byte("key1"), []byte("v1-initial")); err != nil {
+		t.Fatalf("Put key1 v1 failed: %v", err)
+	}
+	if err := db.Put(ctx, []byte("key1"), []byte("v1-overwrite")); err != nil {
+		t.Fatalf("Put key1 v2 failed: %v", err)
+	}
+
+	// Write key2, then delete it
+	if err := db.Put(ctx, []byte("key2"), []byte("v2-will-delete")); err != nil {
+		t.Fatalf("Put key2 failed: %v", err)
+	}
+	if err := db.Delete(ctx, []byte("key2")); err != nil {
+		t.Fatalf("Delete key2 failed: %v", err)
+	}
+
+	// Write key3 normally
+	if err := db.Put(ctx, []byte("key3"), []byte("v3-normal")); err != nil {
+		t.Fatalf("Put key3 failed: %v", err)
+	}
+
+	// Write key4, delete, then resurrect
+	if err := db.Put(ctx, []byte("key4"), []byte("v4-first")); err != nil {
+		t.Fatalf("Put key4 v1 failed: %v", err)
+	}
+	if err := db.Delete(ctx, []byte("key4")); err != nil {
+		t.Fatalf("Delete key4 failed: %v", err)
+	}
+	if err := db.Put(ctx, []byte("key4"), []byte("v4-resurrected")); err != nil {
+		t.Fatalf("Put key4 v2 failed: %v", err)
+	}
+
+	seqnoBeforeClose := db.seqno
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Phase 2: Reopen and verify all state is restored
+	db, err = Open(dir)
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	defer db.Close()
+
+	// Verify sequence number restored
+	if db.seqno != seqnoBeforeClose {
+		t.Errorf("seqno after replay = %d, want %d", db.seqno, seqnoBeforeClose)
+	}
+
+	// Verify key1: should have overwritten value
+	got, err := db.Get(ctx, []byte("key1"))
+	if err != nil {
+		t.Errorf("Get key1 failed: %v", err)
+	} else if !slices.Equal(got, []byte("v1-overwrite")) {
+		t.Errorf("key1: expected %q, got %q", "v1-overwrite", got)
+	}
+
+	// Verify key2: should be deleted
+	_, err = db.Get(ctx, []byte("key2"))
+	if !errors.Is(err, ErrKeyNotFound) {
+		t.Errorf("key2 should be deleted, got err=%v", err)
+	}
+
+	// Verify key3: should exist normally
+	got, err = db.Get(ctx, []byte("key3"))
+	if err != nil {
+		t.Errorf("Get key3 failed: %v", err)
+	} else if !slices.Equal(got, []byte("v3-normal")) {
+		t.Errorf("key3: expected %q, got %q", "v3-normal", got)
+	}
+
+	// Verify key4: should be resurrected
+	got, err = db.Get(ctx, []byte("key4"))
+	if err != nil {
+		t.Errorf("Get key4 failed: %v", err)
+	} else if !slices.Equal(got, []byte("v4-resurrected")) {
+		t.Errorf("key4: expected %q, got %q", "v4-resurrected", got)
+	}
+
+	// Verify new writes get correct seqno
+	if err := db.Put(ctx, []byte("key5"), []byte("v5-new")); err != nil {
+		t.Fatalf("Put key5 failed: %v", err)
+	}
+	if db.seqno != seqnoBeforeClose+1 {
+		t.Errorf("seqno after new write = %d, want %d", db.seqno, seqnoBeforeClose+1)
+	}
 }

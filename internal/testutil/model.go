@@ -1,54 +1,123 @@
 package testutil
 
-// Model is a simple in-memory key-value store for testing.
-// It tracks the expected state of the database.
+import (
+	"bytes"
+	"math"
+)
+
+// entry represents a single versioned write (put or delete
+type entry struct {
+	key      []byte
+	value    []byte // nil for tombstones
+	seqno    uint64
+	isDelete bool
+}
+
+// Model is a reference implementation for testing memtable correctness.
+// It stores all versions of all keys to support snapshot reads.
 type Model struct {
-	data map[string][]byte
+	entries []entry // All writes, in insertion order
 }
 
 // NewModel creates a new empty model.
 func NewModel() *Model {
 	return &Model{
-		data: make(map[string][]byte),
+		entries: make([]entry, 0, 10),
 	}
 }
 
-// Put stores a key-value pair. Value is copied.
-func (m *Model) Put(key, value []byte) {
-	// Copy value to prevent external mutation
-	valueCopy := make([]byte, len(value))
-	copy(valueCopy, value)
-	m.data[string(key)] = valueCopy
+// PutAt stores a key-value pair at a specific sequence number.
+func (m *Model) PutAt(key, value []byte, seqno uint64) {
+	// Copy key & value to prevent external mutation
+	keyCopy := append([]byte(nil), key...)
+	valueCopy := append([]byte(nil), value...)
+
+	m.entries = append(m.entries, entry{
+		key:      keyCopy,
+		value:    valueCopy,
+		seqno:    seqno,
+		isDelete: false,
+	})
 }
 
-// Delete removes a key.
+// DeleteAt stores a tombstone at a specific sequence number.
+func (m *Model) DeleteAt(key []byte, seqno uint64) {
+	// Copy key & value to prevent external mutation
+	keyCopy := append([]byte(nil), key...)
+
+	m.entries = append(m.entries, entry{
+		key:      keyCopy,
+		value:    nil,
+		seqno:    seqno,
+		isDelete: true,
+	})
+}
+
+// GetAt returns the value for key at the given seqno.
+// Returns the newest version with seqno <= target.
+// Returns (nil, false) if not found or if newest version is a tombstone.
+func (m *Model) GetAt(key []byte, seqno uint64) ([]byte, bool) {
+	var best *entry
+
+	for i := range m.entries {
+		e := &m.entries[i]
+		if !bytes.Equal(e.key, key) {
+			continue
+		}
+		if e.seqno > seqno {
+			continue // Too new
+		}
+		// Use >= so later entries win when seqnos are equal (last-write-wins)
+		if best == nil || e.seqno >= best.seqno {
+			best = e
+		}
+	}
+
+	if best == nil {
+		return nil, false
+	}
+	if best.isDelete {
+		return nil, false // Tombstone
+	}
+
+	// Return a copy
+	result := make([]byte, len(best.value))
+	copy(result, best.value)
+	return result, true
+}
+
+// Put stores a key-value pair. Key & value are copied.
+func (m *Model) Put(key, value []byte) {
+	m.PutAt(key, value, math.MaxUint64)
+}
+
+// Delete removes a key. Key is copied.
 func (m *Model) Delete(key []byte) {
-	delete(m.data, string(key))
+	m.DeleteAt(key, math.MaxUint64)
 }
 
 // Get retrieves a value. Returns (value, true) if found, (nil, false) if not.
 func (m *Model) Get(key []byte) ([]byte, bool) {
-	value, ok := m.data[string(key)]
-	if !ok {
-		return nil, false
-	}
-
-	// Return a copy to prevent external mutation
-	valueCopy := make([]byte, len(value))
-	copy(valueCopy, value)
-	return valueCopy, true
+	return m.GetAt(key, math.MaxUint64)
 }
 
 // Keys returns all keys in the model (for iteration in tests).
 func (m *Model) Keys() [][]byte {
-	keys := make([][]byte, 0, len(m.data))
-	for k := range m.data {
-		keys = append(keys, []byte(k))
+	seen := make(map[string]bool)
+	var keys [][]byte
+
+	for _, entry := range m.entries {
+		keyStr := string(entry.key)
+		if !seen[keyStr] {
+			seen[keyStr] = true
+			keyCopy := append([]byte(nil), entry.key...)
+			keys = append(keys, keyCopy)
+		}
 	}
 	return keys
 }
 
 // Len returns the number of keys in the model.
 func (m *Model) Len() int {
-	return len(m.data)
+	return len(m.entries)
 }

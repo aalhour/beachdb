@@ -56,7 +56,7 @@ Notes:
 
 - Keys and values are **opaque byte slices** (`[]byte`).
 - Key ordering is **lexicographic byte order**.
-- Any “HBase-like composite key encoding” (row|family|qualifier|ts) belongs in a higher layer later, without changing the engine contract.
+- Any "HBase-like composite key encoding" (row|family|qualifier|ts) belongs in a higher layer later, without changing the engine contract.
 
 ---
 
@@ -69,7 +69,7 @@ Notes:
   - `Iterator` reads at the snapshot captured at iterator creation time.
 - A snapshot read is **stable**:
   - It must not observe partial state during flush/compaction.
-  - It must not “time travel” forward while iterating.
+  - It must not "time travel" forward while iterating.
 
 ---
 
@@ -106,6 +106,8 @@ We will explicitly cover these in the WAL/durability work and its corresponding 
 - barriers / drive caches / “did it *actually* hit stable storage?”
 - batching/group-commit as a later milestone
 
+See [`docs/formats/wal.md`](formats/wal.md) and [`docs/formats/batch.md`](formats/batch.md) for wire formats.
+
 ---
 
 ## Storage model (LSM)
@@ -121,6 +123,17 @@ Compaction:
 
 - v0.1 may ship without compaction initially, but the design must allow adding:
   - exactly **one** compaction strategy (knob-free story) in v0.2+
+
+---
+
+## Memtable semantics
+
+- Keys sorted by `(user_key ASC, seqno DESC)` — newest version first
+- Writes always insert; never update in place (MVCC)
+- Deletes write tombstones (entries with `Kind=Delete`)
+- Iterator sees all entries unfiltered; higher layers filter by snapshot
+
+See [`docs/memtable.md`](memtable.md) for detailed semantics.
 
 ---
 
@@ -143,7 +156,7 @@ Compaction:
   - run a workload, crash/kill mid-write, reopen, verify invariants
 - **Inspection tools are first-class**:
   - `wal_dump`, `sst_dump`, `manifest_dump`
-  - “I don’t trust it until I can dump it.”
+  - "I don't trust it until I can dump it."
 
 ---
 
