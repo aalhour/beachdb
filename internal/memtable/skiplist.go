@@ -222,36 +222,103 @@ func (sl *SkipList) Empty() bool {
 }
 
 // SkipListIterator provides forward iteration over a SkipList's entries.
+// Thread safety: The iterator holds a read lock from the first Seek/SeekToFirst
+// call until Close. Concurrent writes will block until Close is called.
+// Users MUST call Close to release the lock; failing to do so will deadlock writers.
 type SkipListIterator struct {
-	list *SkipList // The skip list being iterated
-	node *skipNode // Current node
+	list   *SkipList // The skip list being iterated
+	node   *skipNode // Current node (nil = invalid position)
+	locked bool      // True if we hold the read lock
 }
 
 // NewSkipListIterator creates a new iterator for the given skip list.
+// The iterator is initially invalid; call SeekToFirst or Seek to position it.
 func NewSkipListIterator(list *SkipList) *SkipListIterator {
 	return &SkipListIterator{
-		list: list,
-		node: nil,
+		list:   list,
+		node:   nil,
+		locked: false,
 	}
 }
 
-// SeekToFirst positions the iterator at the first entry. (TODO: implement)
-func (it *SkipListIterator) SeekToFirst() {}
+// acquireLock ensures we hold the read lock (idempotent).
+func (it *SkipListIterator) acquireLock() {
+	if !it.locked {
+		it.list.mu.RLock()
+		it.locked = true
+	}
+}
 
-// Seek positions the iterator at the first entry with key >= target. (TODO: implement)
-func (it *SkipListIterator) Seek(_ []byte) {}
+// SeekToFirst positions the iterator at the first entry.
+// After this call, Valid() returns true if the list is non-empty.
+func (it *SkipListIterator) SeekToFirst() {
+	it.acquireLock()
+	it.node = it.list.head.next[0]
+}
+
+// Seek positions the iterator at the first entry with key >= target.
+// The target is treated as a user key; the iterator will position at the
+// first internal key whose user key >= target (respecting internal key ordering).
+func (it *SkipListIterator) Seek(target []byte) {
+	it.acquireLock()
+
+	// Build a search key with max seqno so we find the first entry for this user key.
+	// InternalKey ordering: user key ASC, seqno DESC.
+	// Using max seqno means we'll land at or before the first entry with this user key.
+	searchKey := keys.InternalKey{
+		UserKey: target,
+		Seqno:   ^uint64(0), // max uint64
+		Kind:    keys.InternalKeyKindPut,
+	}
+
+	preds := it.list.findPredecessors(searchKey)
+
+	// preds[0].next[0] is the first node >= searchKey
+	it.node = preds[0].next[0]
+}
 
 // Valid returns true if the iterator is positioned at a valid entry.
-func (it *SkipListIterator) Valid() bool { return false }
+func (it *SkipListIterator) Valid() bool {
+	return it.node != nil
+}
 
-// Next advances the iterator to the next entry. (TODO: implement)
-func (it *SkipListIterator) Next() {}
+// Next advances the iterator to the next entry.
+// If the iterator is already at the end, it becomes invalid.
+func (it *SkipListIterator) Next() {
+	if it.node != nil {
+		it.node = it.node.next[0]
+	}
+}
 
 // Key returns the key at the current position.
-func (it *SkipListIterator) Key() keys.InternalKey { return keys.InternalKey{} }
+// Only valid if Valid() returns true.
+func (it *SkipListIterator) Key() keys.InternalKey {
+	if it.node == nil {
+		return keys.InternalKey{}
+	}
+	return it.node.key
+}
 
 // Value returns the value at the current position.
-func (it *SkipListIterator) Value() []byte { return []byte(nil) }
+// Returns a copy to prevent caller mutation.
+// Only valid if Valid() returns true.
+func (it *SkipListIterator) Value() []byte {
+	if it.node == nil {
+		return nil
+	}
+	result := make([]byte, len(it.node.value))
+	copy(result, it.node.value)
+	return result
+}
 
 // Close releases any resources held by the iterator.
-func (it *SkipListIterator) Close() error { return nil }
+// After Close, the iterator must not be used.
+func (it *SkipListIterator) Close() error {
+	if it.locked {
+		it.list.mu.RUnlock()
+		it.locked = false
+	}
+	it.node = nil
+	it.list = nil
+	return nil
+}
