@@ -353,7 +353,9 @@ func TestDB_ConcurrentWrites(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := range numOpsPerGoroutine {
+				//nolint:gosec // G115: test code with small bounded values
 				key := []byte("key_" + string(rune(id)) + "_" + string(rune(j)))
+				//nolint:gosec // G115: test code with small bounded values
 				value := []byte("value_" + string(rune(id)) + "_" + string(rune(j)))
 				if err := db.Put(ctx, key, value); err != nil {
 					t.Errorf("goroutine %d: failed to put: %v", id, err)
@@ -366,6 +368,7 @@ func TestDB_ConcurrentWrites(t *testing.T) {
 
 	// Verify that all writes succeeded by checking a few keys
 	for i := range numGoroutines {
+		//nolint:gosec // G115: test code with small bounded values
 		key := []byte("key_" + string(rune(i)) + "_" + string(rune(0)))
 		_, err := db.Get(ctx, key)
 		if err != nil {

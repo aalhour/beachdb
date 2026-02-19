@@ -836,7 +836,7 @@ func TestReader_Next_ManualRecordConstruction(t *testing.T) {
 		record[4] = 0x00
 		record[5] = 0x00
 		record[6] = 0x00
-		record[7] = byte(len(payload))
+		record[7] = byte(len(payload)) //nolint:gosec // G115: test data, length is small
 		// Wrong checksum
 		record[8] = 0xDE
 		record[9] = 0xAD
@@ -870,12 +870,12 @@ func TestReader_Next_ManualRecordConstruction(t *testing.T) {
 		record[4] = 0x00
 		record[5] = 0x00
 		record[6] = 0x00
-		record[7] = byte(len(payload))
+		record[7] = byte(len(payload)) //nolint:gosec // G115: test data, length is small
 		// Correct checksum (big-endian)
-		record[8] = byte(csum >> 24)
-		record[9] = byte(csum >> 16)
-		record[10] = byte(csum >> 8)
-		record[11] = byte(csum)
+		record[8] = byte(csum >> 24) //nolint:gosec // G115: checksum bytes
+		record[9] = byte(csum >> 16) //nolint:gosec // G115: checksum bytes
+		record[10] = byte(csum >> 8) //nolint:gosec // G115: checksum bytes
+		record[11] = byte(csum)      //nolint:gosec // G115: checksum bytes
 		copy(record[12:], payload)
 
 		//nolint:gosec // G306: 0644 is acceptable for test files

@@ -18,6 +18,7 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() < 1 {
+		//nolint:gosec // G705: os.Args[0] is the program name, not user input
 		fmt.Fprintf(os.Stderr, "Usage: %s [-decode] <wal-file-path>\n", os.Args[0])
 		os.Exit(1)
 	}

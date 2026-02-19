@@ -26,8 +26,8 @@ func (n *skipNode) memSize() int {
 		24 // struct overhead estimate
 }
 
-// SkipList is a probabilistic data structure that provides
-// lock-friendly O(log n) insertion and search
+// SkipList is a probabilistic data structure that provides O(log n) insertion
+// and search with lock-friendly concurrent access. It implements the Memtable interface.
 type SkipList struct {
 	mu       sync.RWMutex // Reader-writer lock
 	rng      *rand.Rand   // Random number generator for level selection
@@ -54,6 +54,11 @@ func NewSkipList() *SkipList {
 		level: 1,
 		rng:   rand.New(rand.NewPCG(seed1, seed2)), //nolint:gosec // crypto/rand unnecessary for skip list levels
 	}
+}
+
+// NewIterator returns an iterator over the skip list entries.
+func (sl *SkipList) NewIterator() Iterator {
+	return NewSkipListIterator(sl)
 }
 
 // randomLevel returns a random level for a new node.
@@ -215,3 +220,38 @@ func (sl *SkipList) Empty() bool {
 	defer sl.mu.RUnlock()
 	return sl.length == 0
 }
+
+// SkipListIterator provides forward iteration over a SkipList's entries.
+type SkipListIterator struct {
+	list *SkipList // The skip list being iterated
+	node *skipNode // Current node
+}
+
+// NewSkipListIterator creates a new iterator for the given skip list.
+func NewSkipListIterator(list *SkipList) *SkipListIterator {
+	return &SkipListIterator{
+		list: list,
+		node: nil,
+	}
+}
+
+// SeekToFirst positions the iterator at the first entry. (TODO: implement)
+func (it *SkipListIterator) SeekToFirst() {}
+
+// Seek positions the iterator at the first entry with key >= target. (TODO: implement)
+func (it *SkipListIterator) Seek(_ []byte) {}
+
+// Valid returns true if the iterator is positioned at a valid entry.
+func (it *SkipListIterator) Valid() bool { return false }
+
+// Next advances the iterator to the next entry. (TODO: implement)
+func (it *SkipListIterator) Next() {}
+
+// Key returns the key at the current position.
+func (it *SkipListIterator) Key() keys.InternalKey { return keys.InternalKey{} }
+
+// Value returns the value at the current position.
+func (it *SkipListIterator) Value() []byte { return []byte(nil) }
+
+// Close releases any resources held by the iterator.
+func (it *SkipListIterator) Close() error { return nil }

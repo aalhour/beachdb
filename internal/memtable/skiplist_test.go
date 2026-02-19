@@ -516,6 +516,7 @@ func TestPut_Concurrent(t *testing.T) {
 			defer wg.Done()
 			for i := range insertsPerGoroutine {
 				key := keys.InternalKey{
+					//nolint:gosec // G115: test code with small bounded values
 					UserKey: []byte("g" + string(rune('0'+goroutineID)) + "-" + string(rune('A'+i%26))),
 					Seqno:   uint64(goroutineID*1000 + i), //nolint:gosec // test code, values are small
 					Kind:    keys.InternalKeyKindPut,
