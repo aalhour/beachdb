@@ -297,6 +297,65 @@ func Test_ByteReader_ReadUint32(t *testing.T) {
 	}
 }
 
+func Test_ByteReader_ReadUint64(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   []byte
+		expect  uint64
+		wantErr bool
+	}{
+		{
+			name:    "simple uint64",
+			input:   []byte{0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78},
+			expect:  0x1234567812345678,
+			wantErr: false,
+		},
+		{
+			name:    "all zero",
+			input:   []byte{0, 0, 0, 0, 0, 0, 0, 0},
+			expect:  0,
+			wantErr: false,
+		},
+		{
+			name:    "max uint64",
+			input:   []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
+			expect:  0xFFFFFFFFFFFFFFFF,
+			wantErr: false,
+		},
+		{
+			name:    "less than 8 bytes",
+			input:   []byte{1, 2, 3, 4, 5},
+			expect:  0,
+			wantErr: true,
+		},
+		{
+			name:    "empty input",
+			input:   []byte{},
+			expect:  0,
+			wantErr: true,
+		},
+		{
+			name:    "extra data after uint64",
+			input:   []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xFF},
+			expect:  0x0102030405060708,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewByteReader(tt.input)
+			got, err := r.ReadUint64()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ReadUint64: unexpected error state: got err=%v, wantErr=%v", err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.expect {
+				t.Errorf("ReadUint64: got %08x, want %08x", got, tt.expect)
+			}
+		})
+	}
+}
+
 func Test_ByteReader_Remaining(t *testing.T) {
 	tests := []struct {
 		name    string
