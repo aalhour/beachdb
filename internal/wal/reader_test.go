@@ -496,7 +496,7 @@ func TestReader_Next(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "truncated_payload.wal")
 
 		// Create a valid header claiming 100 bytes payload, but provide fewer
-		header := make([]byte, recordHeaderSize)
+		header := make([]byte, recordHeaderSize, recordHeaderSize+10)
 		header[0] = 0xBE // magic high byte (big-endian: 0xBEAC)
 		header[1] = 0xAC // magic low byte
 		header[2] = 0x01 // version
