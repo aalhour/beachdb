@@ -6,7 +6,7 @@ type options struct {
 	blockSize   int  // Size of each block inside the table
 }
 
-// WriterOption configures how the database is opened.
+// WriterOption configures the SSTable writer.
 type WriterOption func(*options)
 
 // WithSync controls whether files are fsync'd on close.

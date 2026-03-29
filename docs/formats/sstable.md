@@ -212,7 +212,7 @@ Footer size: 40 bytes
 
 | Field | Value | Purpose |
 |-------|-------|---------|
-| `magic` | `BCHSST01` | Identifies the file as a BeachDB SSTable before any deeper parsing happens. |
+| `magic` | `BEACHSST` | Identifies the file as a BeachDB SSTable before any deeper parsing happens. |
 | `version` | `0x00000001` | Reject unsupported future layouts. |
 | `index_offset` | uint64 | Lets the reader find the index block without scanning the file. |
 | `index_size` | uint32 | Tells the reader exactly how many bytes to read for the index block. |
@@ -225,7 +225,7 @@ Footer size: 40 bytes
 The 8-byte footer magic is the ASCII string:
 
 ```text
-B C H S S T 0 1
+B E A C H S S T
 ```
 
 This is encoded literally in the file as 8 bytes, and interpreted as a big-endian `uint64` in code if desired.

@@ -1,6 +1,7 @@
 package sstable
 
 import (
+	"fmt"
 	"os"
 	"sync"
 
@@ -11,7 +12,6 @@ import (
 
 // blockBuilder is used to build blocks in the SST file
 type blockBuilder struct {
-	mu         sync.RWMutex
 	buf        []byte
 	entryCount uint32
 	firstKey   keys.InternalKey
@@ -19,7 +19,8 @@ type blockBuilder struct {
 	hasEntries bool
 }
 
-// indexEntry represents a single index added to the footer of an SST
+// indexEntry represents a single index added to
+// the index block
 type indexEntry struct {
 	lastKey keys.InternalKey
 	offset  uint64
@@ -29,49 +30,37 @@ type indexEntry struct {
 // newBlockBuilder creates a new blockBuilder struct.
 func newBlockBuilder() *blockBuilder {
 	return &blockBuilder{
-		buf: make([]byte, 1024),
+		buf: make([]byte, 0, 1024),
 	}
 }
 
+// Empty returns whether the block has entries or not
 func (b *blockBuilder) Empty() bool {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	return b.hasEntries == false
+	return !b.hasEntries
 }
 
+// Size returns the length of the block (in bytes)
 func (b *blockBuilder) Size() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
 	return len(b.buf)
 }
 
+// EntryCount returns the number of entries in the interal buffer
 func (b *blockBuilder) EntryCount() uint32 {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
 	return b.entryCount
 }
 
+// FirstKey returns the first key added
 func (b *blockBuilder) FirstKey() keys.InternalKey {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
 	return b.firstKey
 }
 
+// LastKey returns the last key added
 func (b *blockBuilder) LastKey() keys.InternalKey {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
 	return b.lastKey
 }
 
+// Add adds a key and value pair (encoded) to the internal buffer
 func (b *blockBuilder) Add(key keys.InternalKey, value []byte) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	// Entry encoding inside a block
 	// [internal_key_len:4][internal_key_bytes][value_len:4][value_bytes]
 
@@ -87,11 +76,11 @@ func (b *blockBuilder) Add(key keys.InternalKey, value []byte) {
 	// Create a buffer for this entry alone
 	buf := make([]byte, entrySize)
 	offset := 0
-	coding.PutUint32(buf[offset:], uint32(len(encoded)))
+	coding.PutUint32(buf[offset:], uint32(len(encoded))) //nolint:gosec // key length fits in uint32
 	offset += 4
 	copy(buf[offset:], encoded)
 	offset += len(encoded)
-	coding.PutUint32(buf[offset:], uint32(len(value)))
+	coding.PutUint32(buf[offset:], uint32(len(value))) //nolint:gosec // value length fits in uint32
 	offset += 4
 	copy(buf[offset:], value)
 
@@ -104,13 +93,12 @@ func (b *blockBuilder) Add(key keys.InternalKey, value []byte) {
 		b.hasEntries = true
 	}
 	b.lastKey = key
-	b.entryCount += 1
+	b.entryCount++
 }
 
+// Finish calculates checksum of internal buffer, appends it at the end of
+// buffer and returns the final byte array
 func (b *blockBuilder) Finish() []byte {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	// First calculate the checksum (without the checksum placeholder)
 	crc32 := checksum.CRC32C(b.buf)
 
@@ -122,13 +110,11 @@ func (b *blockBuilder) Finish() []byte {
 	return b.buf
 }
 
+// Reset clears the buffer and resets metadata for reuse
 func (b *blockBuilder) Reset() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	b.entryCount = 0
 	b.hasEntries = false
-	b.buf = make([]byte, 1024)
+	b.buf = make([]byte, 0, 1024)
 	b.firstKey = keys.InternalKey{}
 	b.lastKey = keys.InternalKey{}
 }
@@ -155,6 +141,15 @@ type Writer struct {
 func NewWriter(file *os.File, opts ...WriterOption) (*Writer, error) {
 	cfg := applyOptions(opts)
 
+	// Validate file and options
+	if file == nil {
+		return nil, ErrNilFile
+	}
+
+	if cfg.blockSize <= 0 {
+		return nil, ErrInvalidBlockSize
+	}
+
 	blockBuilder := newBlockBuilder()
 
 	writer := &Writer{
@@ -176,8 +171,8 @@ func (w *Writer) Add(key keys.InternalKey, value []byte) error {
 		return ErrWriterClosed
 	}
 
-	// New key must be strictly larger than the last seen key
-	if w.lastKey.Compare(key) >= 0 {
+	// New key must be strictly larger than the last key added
+	if w.hasEntries && w.lastKey.Compare(key) >= 0 {
 		return ErrOutOfOrderKey
 	}
 
@@ -185,7 +180,7 @@ func (w *Writer) Add(key keys.InternalKey, value []byte) error {
 	// only if the current block has other entries.
 	// However, if the block is empty we allow a large entry that
 	// would overflow the block to have its own entry block (simpler design)
-	if w.currentBlock.hasEntries {
+	if !w.currentBlock.Empty() {
 		estimatedSize := estimatedEntrySize(key, value)
 		currBlockSize := w.currentBlock.Size() + estimatedSize
 		if currBlockSize > w.targetBlockSize {
@@ -202,7 +197,7 @@ func (w *Writer) Add(key keys.InternalKey, value []byte) error {
 	// Update metadata
 	w.lastKey = key
 	w.hasEntries = true
-	w.entryCount += 1
+	w.entryCount++
 
 	return nil
 }
@@ -216,17 +211,45 @@ func (w *Writer) Close() error {
 		return ErrWriterClosed
 	}
 
-	// Check if current block has entries and if yes, flush it!
+	var firstErr error
+
+	// Flush the last partial data block if it has entries
 	if w.currentBlock.hasEntries {
 		if err := w.flushCurrentBlock(); err != nil {
-			return err
+			firstErr = err
 		}
 	}
 
-	indexBlock := w.buildIndexBlock()
+	// Write the index block
+	if firstErr == nil {
+		indexBlock := w.buildIndexBlock()
+		indexOffset := w.offset
+		indexSize := uint32(len(indexBlock)) //nolint:gosec // index block size fits in uint32
+
+		if _, err := w.file.Write(indexBlock); err != nil {
+			firstErr = err
+		}
+
+		// Write the footer
+		if firstErr == nil {
+			f := newFooter(indexOffset, indexSize, w.dataBlockCount, w.entryCount)
+			if _, err := w.file.Write(f.Encode()); err != nil {
+				firstErr = err
+			}
+		}
+	}
+
+	// Sync if configured
+	if firstErr == nil && w.syncOnClose {
+		if err := w.file.Sync(); err != nil {
+			firstErr = err
+		}
+	}
+
+	// Always mark closed, even on error
 	w.closed = true
 
-	return nil
+	return firstErr
 }
 
 // flushCurrentBlock flushes the current block to disk
@@ -236,23 +259,24 @@ func (w *Writer) flushCurrentBlock() error {
 	blockBytes := w.currentBlock.Finish()
 
 	// Write the data to the file
+	// We do *NOT* call w.file.Sync() here, see `syncOnClose`
+	// option's behavior in Close() function
 	_, err := w.file.Write(blockBytes)
 	if err != nil {
-		return err
+		return fmt.Errorf("beachdb/sstable: writing block: %w", err)
 	}
-	w.file.Sync()
 
 	// Record an index entry
 	newIndex := indexEntry{
 		lastKey: w.currentBlock.LastKey(),
 		offset:  w.offset,
-		size:    uint32(len(blockBytes)),
+		size:    uint32(len(blockBytes)), //nolint:gosec // block size fits in uint32
 	}
 	w.indexEntries = append(w.indexEntries, newIndex)
 
 	// Update metadata
-	w.offset = uint64(len(blockBytes))
-	w.dataBlockCount += 1
+	w.offset += uint64(len(blockBytes))
+	w.dataBlockCount++
 
 	// Reset the current block builder
 	w.currentBlock.Reset()
@@ -260,8 +284,32 @@ func (w *Writer) flushCurrentBlock() error {
 	return nil
 }
 
+// buildIndexBlock encodes all index entries and appends a CRC32C trailer.
 func (w *Writer) buildIndexBlock() []byte {
-	return nil
+	// Encode each index entry: [lastKeyLen:4][lastKeyBytes][blockOffset:8][blockSize:4]
+
+	var buf []byte
+	for _, entry := range w.indexEntries {
+		encoded := entry.lastKey.Encode()
+		rec := make([]byte, 4+len(encoded)+8+4)
+		offset := 0
+		coding.PutUint32(rec[offset:], uint32(len(encoded))) //nolint:gosec // key length fits in uint32
+		offset += 4
+		copy(rec[offset:], encoded)
+		offset += len(encoded)
+		coding.PutUint64(rec[offset:], entry.offset)
+		offset += 8
+		coding.PutUint32(rec[offset:], entry.size)
+		buf = append(buf, rec...)
+	}
+
+	// Append CRC32C trailer
+	crc := checksum.CRC32C(buf)
+	trailer := make([]byte, checksumSize)
+	coding.PutUint32(trailer, crc)
+	buf = append(buf, trailer...)
+
+	return buf
 }
 
 // estimatedEntrySize returns an approximation of the key + value sizes in the block
