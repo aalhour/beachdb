@@ -288,7 +288,13 @@ func (w *Writer) flushCurrentBlock() error {
 func (w *Writer) buildIndexBlock() []byte {
 	// Encode each index entry: [lastKeyLen:4][lastKeyBytes][blockOffset:8][blockSize:4]
 
-	var buf []byte
+	// Pre-compute total size: for each entry [keyLen:4][keyBytes][offset:8][size:4] + trailer
+	totalSize := checksumSize
+	for _, entry := range w.indexEntries {
+		totalSize += 4 + len(entry.lastKey.Encode()) + 8 + 4
+	}
+
+	buf := make([]byte, 0, totalSize)
 	for _, entry := range w.indexEntries {
 		encoded := entry.lastKey.Encode()
 		rec := make([]byte, 4+len(encoded)+8+4)
