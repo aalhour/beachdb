@@ -280,7 +280,7 @@ func (w *Writer) buildIndexBlock() []byte {
 
 	// Encode all keys once to avoid double-encoding during size computation and writing.
 	encodedKeys := make([][]byte, len(w.indexEntries))
-	totalSize := checksumSize
+	totalSize := int(checksumSize)
 	for i, entry := range w.indexEntries {
 		encodedKeys[i] = entry.lastKey.Encode()
 		totalSize += 4 + len(encodedKeys[i]) + 8 + 4

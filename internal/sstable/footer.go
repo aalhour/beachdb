@@ -6,10 +6,10 @@ import (
 )
 
 const (
-	footerSize          = 40
-	sstMagic            = "BEACHSST"
+	footerSize   uint32 = 40
+	sstMagic     string = "BEACHSST"
 	sstVersion   uint32 = 1
-	checksumSize        = 4
+	checksumSize uint32 = 4
 )
 
 // footer defines the values inside the footer block
@@ -62,7 +62,7 @@ func (f *footer) encode() []byte {
 // DecodeFooter takes raw footer data byte and decodes it into
 // a footer struct and verifies its magic, version and checksum parts
 func decodeFooter(data []byte) (footer, error) {
-	if len(data) != footerSize {
+	if len(data) != int(footerSize) {
 		return footer{}, ErrCorruptFooter
 	}
 

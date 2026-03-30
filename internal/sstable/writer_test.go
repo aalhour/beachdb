@@ -2,6 +2,7 @@ package sstable
 
 import (
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -169,8 +170,8 @@ func TestBlockBuilder_Finish_ChecksumTrailer(t *testing.T) {
 	finished := b.Finish()
 
 	// The last 4 bytes are the CRC32C of everything before them
-	payload := finished[:len(finished)-checksumSize]
-	storedCRC := coding.Uint32(finished[len(finished)-checksumSize:])
+	payload := finished[:len(finished)-int(checksumSize)]
+	storedCRC := coding.Uint32(finished[len(finished)-int(checksumSize):])
 	computedCRC := checksum.CRC32C(payload)
 
 	if storedCRC != computedCRC {
@@ -185,7 +186,7 @@ func TestBlockBuilder_Finish_ByteLayout(t *testing.T) {
 
 	b.Add(key, val)
 	finished := b.Finish()
-	payload := finished[:len(finished)-checksumSize]
+	payload := finished[:len(finished)-int(checksumSize)]
 
 	// Parse the entry manually
 	br := coding.NewByteReader(payload)
@@ -281,8 +282,8 @@ func TestBlockBuilder_BinaryKeysAndValues(t *testing.T) {
 	finished := b.Finish()
 
 	// Verify checksum
-	payload := finished[:len(finished)-checksumSize]
-	storedCRC := coding.Uint32(finished[len(finished)-checksumSize:])
+	payload := finished[:len(finished)-int(checksumSize)]
+	storedCRC := coding.Uint32(finished[len(finished)-int(checksumSize):])
 	if storedCRC != checksum.CRC32C(payload) {
 		t.Fatal("checksum mismatch for binary key/value")
 	}
@@ -293,7 +294,7 @@ func TestBlockBuilder_EmptyValue(t *testing.T) {
 	b.Add(putKey("key", 1), []byte{})
 
 	finished := b.Finish()
-	payload := finished[:len(finished)-checksumSize]
+	payload := finished[:len(finished)-int(checksumSize)]
 
 	// Parse and verify value length is 0
 	br := coding.NewByteReader(payload)
@@ -407,7 +408,7 @@ func TestWriter_EmptyTable(t *testing.T) {
 	}
 
 	// Decode and verify footer
-	footerData := data[len(data)-footerSize:]
+	footerData := data[len(data)-int(footerSize):]
 	f, err := decodeFooter(footerData)
 	if err != nil {
 		t.Fatalf("decodeFooter: %v", err)
@@ -434,7 +435,7 @@ func TestWriter_SingleEntry(t *testing.T) {
 	}
 
 	data := readFileBytes(t, path)
-	f, err := decodeFooter(data[len(data)-footerSize:])
+	f, err := decodeFooter(data[len(data)-int(footerSize):])
 	if err != nil {
 		t.Fatalf("decodeFooter: %v", err)
 	}
@@ -463,7 +464,7 @@ func TestWriter_MultipleBlocks(t *testing.T) {
 	}
 
 	data := readFileBytes(t, path)
-	f, err := decodeFooter(data[len(data)-footerSize:])
+	f, err := decodeFooter(data[len(data)-int(footerSize):])
 	if err != nil {
 		t.Fatalf("decodeFooter: %v", err)
 	}
@@ -489,7 +490,7 @@ func TestWriter_AllowsOversizedSingleEntry(t *testing.T) {
 	}
 
 	data := readFileBytes(t, path)
-	f, err := decodeFooter(data[len(data)-footerSize:])
+	f, err := decodeFooter(data[len(data)-int(footerSize):])
 	if err != nil {
 		t.Fatalf("decodeFooter: %v", err)
 	}
@@ -538,7 +539,7 @@ func TestWriter_FooterLayout(t *testing.T) {
 	}
 
 	data := readFileBytes(t, path)
-	ft := data[len(data)-footerSize:]
+	ft := data[len(data)-int(footerSize):]
 
 	// Verify magic (bytes 0-7)
 	magic := string(ft[0:8])
@@ -562,7 +563,7 @@ func TestWriter_FooterLayout(t *testing.T) {
 	// Verify index offset + size are within file bounds
 	indexOffset := coding.Uint64(ft[12:])
 	indexSize := coding.Uint32(ft[20:])
-	if indexOffset+uint64(indexSize) > uint64(len(data))-footerSize {
+	if indexOffset+uint64(indexSize) > uint64(len(data))-uint64(footerSize) {
 		t.Fatal("index block extends past the footer")
 	}
 }
@@ -581,15 +582,15 @@ func TestWriter_BlockChecksumsPresent(t *testing.T) {
 	}
 
 	data := readFileBytes(t, path)
-	f, err := decodeFooter(data[len(data)-footerSize:])
+	f, err := decodeFooter(data[len(data)-int(footerSize):])
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Verify index block checksum
 	indexData := data[f.indexOffset : f.indexOffset+uint64(f.indexSize)]
-	idxPayload := indexData[:len(indexData)-checksumSize]
-	idxStoredCRC := coding.Uint32(indexData[len(indexData)-checksumSize:])
+	idxPayload := indexData[:len(indexData)-int(checksumSize)]
+	idxStoredCRC := coding.Uint32(indexData[len(indexData)-int(checksumSize):])
 	if idxStoredCRC != checksum.CRC32C(idxPayload) {
 		t.Fatal("index block checksum mismatch")
 	}
@@ -616,8 +617,8 @@ func TestWriter_BlockChecksumsPresent(t *testing.T) {
 		}
 
 		block := data[blockOffset : blockOffset+uint64(blockSize)]
-		blockPayload := block[:len(block)-checksumSize]
-		blockStoredCRC := coding.Uint32(block[len(block)-checksumSize:])
+		blockPayload := block[:len(block)-int(checksumSize)]
+		blockStoredCRC := coding.Uint32(block[len(block)-int(checksumSize):])
 		blockComputedCRC := checksum.CRC32C(blockPayload)
 		if blockStoredCRC != blockComputedCRC {
 			t.Fatalf("block %d checksum mismatch: stored=0x%08x computed=0x%08x",
@@ -637,7 +638,7 @@ func TestFooter_EncodeDecodeRoundTrip(t *testing.T) {
 	f := newFooter(12345, 678, 5, 100)
 	encoded := f.encode()
 
-	if len(encoded) != footerSize {
+	if len(encoded) != int(footerSize) {
 		t.Fatalf("encoded footer size: want %d, got %d", footerSize, len(encoded))
 	}
 
@@ -724,21 +725,21 @@ func TestWriter_FileLayoutOrder(t *testing.T) {
 	}
 
 	data := readFileBytes(t, path)
-	f, err := decodeFooter(data[len(data)-footerSize:])
+	f, err := decodeFooter(data[len(data)-int(footerSize):])
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Index block must come right before the footer
 	indexEnd := f.indexOffset + uint64(f.indexSize)
-	footerStart := uint64(len(data)) - footerSize
+	footerStart := uint64(len(data)) - uint64(footerSize)
 	if indexEnd != footerStart {
 		t.Fatalf("index block (ends at %d) should be adjacent to footer (starts at %d)",
 			indexEnd, footerStart)
 	}
 
 	// Parse index entries and verify data blocks are contiguous and in order
-	indexPayload := data[f.indexOffset : f.indexOffset+uint64(f.indexSize)-checksumSize]
+	indexPayload := data[f.indexOffset : f.indexOffset+uint64(f.indexSize)-uint64(checksumSize)]
 	br := coding.NewByteReader(indexPayload)
 
 	var prevEnd uint64
@@ -827,7 +828,7 @@ func TestWriter_RandomizedEntries(t *testing.T) {
 
 	// Verify footer
 	data := readFileBytes(t, path)
-	f, err := decodeFooter(data[len(data)-footerSize:])
+	f, err := decodeFooter(data[len(data)-int(footerSize):])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -837,7 +838,7 @@ func TestWriter_RandomizedEntries(t *testing.T) {
 
 	// Verify all data block checksums via index
 	indexData := data[f.indexOffset : f.indexOffset+uint64(f.indexSize)]
-	idxPayload := indexData[:len(indexData)-checksumSize]
+	idxPayload := indexData[:len(indexData)-int(checksumSize)]
 	br := coding.NewByteReader(idxPayload)
 
 	blockIdx := 0
@@ -859,11 +860,136 @@ func TestWriter_RandomizedEntries(t *testing.T) {
 		}
 
 		block := data[blockOffset : blockOffset+uint64(blockSize)]
-		payload := block[:len(block)-checksumSize]
-		stored := coding.Uint32(block[len(block)-checksumSize:])
+		payload := block[:len(block)-int(checksumSize)]
+		stored := coding.Uint32(block[len(block)-int(checksumSize):])
 		if stored != checksum.CRC32C(payload) {
 			t.Fatalf("block %d: checksum mismatch in randomized test", blockIdx)
 		}
 		blockIdx++
+	}
+}
+
+// --- Benchmarks ---
+
+func createWriterB(b *testing.B, opts ...WriterOption) (*Writer, string) {
+	b.Helper()
+	dir := b.TempDir()
+	path := filepath.Join(dir, "bench.sst")
+	f, err := os.Create(path) //nolint:gosec // bench helper with temp dir
+	if err != nil {
+		b.Fatal(err)
+	}
+	w, err := NewWriter(f, opts...)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return w, path
+}
+
+func BenchmarkBlockBuilder_Add(b *testing.B) {
+	bb := newBlockBuilder()
+	key := putKey("benchmark-key", 1)
+	val := make([]byte, 64)
+	// Warm up so the backing buffer is already allocated
+	bb.Add(key, val)
+	bb.Reset()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		bb.Add(key, val)
+	}
+}
+
+func BenchmarkBlockBuilder_Finish(b *testing.B) {
+	val := make([]byte, 32)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		bb := newBlockBuilder()
+		for i := range 10 {
+			bb.Add(putKey(fmt.Sprintf("k%02d", i), uint64(100-i)), val)
+		}
+		_ = bb.Finish()
+	}
+}
+
+func BenchmarkWriter_Add(b *testing.B) {
+	sizes := []struct {
+		name  string
+		count int
+	}{
+		{"10-entries", 10},
+		{"100-entries", 100},
+		{"1000-entries", 1000},
+	}
+	val := make([]byte, 32)
+	for _, s := range sizes {
+		// Pre-generate keys outside the timed loop
+		ks := make([]keys.InternalKey, s.count)
+		for i := range s.count {
+			ks[i] = putKey(fmt.Sprintf("key-%08d", i), uint64(s.count-i)) //nolint:gosec // count-i is always non-negative
+		}
+		b.Run(s.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				w, _ := createWriterB(b, WithSync(false))
+				for _, k := range ks {
+					_ = w.Add(k, val)
+				}
+				_ = w.Close()
+			}
+		})
+	}
+}
+
+func BenchmarkFooter_Encode(b *testing.B) {
+	f := newFooter(12345, 678, 10, 1000)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = f.encode()
+	}
+}
+
+func BenchmarkFooter_Decode(b *testing.B) {
+	f := newFooter(12345, 678, 10, 1000)
+	encoded := f.encode()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_, _ = decodeFooter(encoded)
+	}
+}
+
+// --- AllocsPerRun tests ---
+
+func TestBlockBuilder_Add_AllocsPerRun(t *testing.T) {
+	bb := newBlockBuilder()
+	key := putKey("bench-key", 1)
+	val := make([]byte, 64)
+	// Warm up so the backing buffer is already allocated
+	bb.Add(key, val)
+	bb.Reset()
+
+	allocs := testing.AllocsPerRun(100, func() {
+		bb.Add(key, val)
+	})
+	// key.Encode() allocates exactly 1 []byte — unavoidable without a scratch buffer.
+	// The blockBuilder itself must not add any extra allocations.
+	if allocs > 1 {
+		t.Errorf("BlockBuilder.Add: expected ≤1 alloc (key.Encode), got %v", allocs)
+	}
+}
+
+func TestBlockBuilder_Reset_NoAllocs(t *testing.T) {
+	bb := newBlockBuilder()
+	bb.Add(putKey("key", 1), []byte("val"))
+
+	allocs := testing.AllocsPerRun(100, func() {
+		bb.Reset()
+	})
+	if allocs != 0 {
+		t.Errorf("BlockBuilder.Reset: expected 0 allocs, got %v", allocs)
 	}
 }

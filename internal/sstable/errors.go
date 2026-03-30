@@ -18,6 +18,9 @@ var (
 	// ErrFileTooSmall is returned when the file length is less than the footer size.
 	ErrFileTooSmall = errors.New("beachdb/sstable: file is smaller than footer size")
 
+	// ErrReadingFile is returned when the file couldn't be read or stat'd.
+	ErrReadingFile = errors.New("beachdb/sstable: couldn't read file")
+
 	// ErrBadMagic is returned when the footer magic does not match the SSTable format.
 	ErrBadMagic = errors.New("beachdb/sstable: invalid magic number")
 
