@@ -66,26 +66,15 @@ func (b *blockBuilder) Add(key keys.InternalKey, value []byte) {
 
 	encoded := key.Encode()
 
-	// Entry size:
-	// 4 bytes: for storing the length of the key
-	// + length of the key (in bytes)
-	// + 4 bytes: for storing the length of the value
-	// + length of the value (in bytes)
-	entrySize := 4 + len(encoded) + 4 + len(value)
-
-	// Create a buffer for this entry alone
-	buf := make([]byte, entrySize)
-	offset := 0
-	coding.PutUint32(buf[offset:], uint32(len(encoded))) //nolint:gosec // key length fits in uint32
-	offset += 4
-	copy(buf[offset:], encoded)
-	offset += len(encoded)
-	coding.PutUint32(buf[offset:], uint32(len(value))) //nolint:gosec // value length fits in uint32
-	offset += 4
-	copy(buf[offset:], value)
-
-	// Append the entry's buffer to the blockBuilder's buffer
-	b.buf = append(b.buf, buf...)
+	// Write directly into b.buf using a stack-allocated length prefix buffer
+	// to avoid an intermediate heap allocation per entry.
+	var lenBuf [4]byte
+	coding.PutUint32(lenBuf[:], uint32(len(encoded))) //nolint:gosec // key length fits in uint32
+	b.buf = append(b.buf, lenBuf[:]...)
+	b.buf = append(b.buf, encoded...)
+	coding.PutUint32(lenBuf[:], uint32(len(value))) //nolint:gosec // value length fits in uint32
+	b.buf = append(b.buf, lenBuf[:]...)
+	b.buf = append(b.buf, value...)
 
 	// Update metadata
 	if !b.hasEntries {
@@ -110,11 +99,12 @@ func (b *blockBuilder) Finish() []byte {
 	return b.buf
 }
 
-// Reset clears the buffer and resets metadata for reuse
+// Reset clears the buffer and resets metadata for reuse.
+// The backing array is retained to avoid a re-allocation on the next block.
 func (b *blockBuilder) Reset() {
 	b.entryCount = 0
 	b.hasEntries = false
-	b.buf = make([]byte, 0, 1024)
+	b.buf = b.buf[:0]
 	b.firstKey = keys.InternalKey{}
 	b.lastKey = keys.InternalKey{}
 }
@@ -181,7 +171,7 @@ func (w *Writer) Add(key keys.InternalKey, value []byte) error {
 	// However, if the block is empty we allow a large entry that
 	// would overflow the block to have its own entry block (simpler design)
 	if !w.currentBlock.Empty() {
-		estimatedSize := estimatedEntrySize(key, value)
+		estimatedSize := encodedEntrySize(key, value)
 		currBlockSize := w.currentBlock.Size() + estimatedSize
 		if currBlockSize > w.targetBlockSize {
 			// Flush the current block to disk and reset the builder
@@ -233,7 +223,7 @@ func (w *Writer) Close() error {
 		// Write the footer
 		if firstErr == nil {
 			f := newFooter(indexOffset, indexSize, w.dataBlockCount, w.entryCount)
-			if _, err := w.file.Write(f.Encode()); err != nil {
+			if _, err := w.file.Write(f.encode()); err != nil {
 				firstErr = err
 			}
 		}
@@ -288,38 +278,39 @@ func (w *Writer) flushCurrentBlock() error {
 func (w *Writer) buildIndexBlock() []byte {
 	// Encode each index entry: [lastKeyLen:4][lastKeyBytes][blockOffset:8][blockSize:4]
 
-	// Pre-compute total size: for each entry [keyLen:4][keyBytes][offset:8][size:4] + trailer
+	// Encode all keys once to avoid double-encoding during size computation and writing.
+	encodedKeys := make([][]byte, len(w.indexEntries))
 	totalSize := checksumSize
-	for _, entry := range w.indexEntries {
-		totalSize += 4 + len(entry.lastKey.Encode()) + 8 + 4
+	for i, entry := range w.indexEntries {
+		encodedKeys[i] = entry.lastKey.Encode()
+		totalSize += 4 + len(encodedKeys[i]) + 8 + 4
 	}
 
+	// Write directly into buf using a stack-allocated tmp buffer for fixed-width fields,
+	// avoiding a per-entry intermediate heap allocation.
 	buf := make([]byte, 0, totalSize)
-	for _, entry := range w.indexEntries {
-		encoded := entry.lastKey.Encode()
-		rec := make([]byte, 4+len(encoded)+8+4)
-		offset := 0
-		coding.PutUint32(rec[offset:], uint32(len(encoded))) //nolint:gosec // key length fits in uint32
-		offset += 4
-		copy(rec[offset:], encoded)
-		offset += len(encoded)
-		coding.PutUint64(rec[offset:], entry.offset)
-		offset += 8
-		coding.PutUint32(rec[offset:], entry.size)
-		buf = append(buf, rec...)
+	var tmp [8]byte
+	for i, entry := range w.indexEntries {
+		coding.PutUint32(tmp[:4], uint32(len(encodedKeys[i]))) //nolint:gosec // key length fits in uint32
+		buf = append(buf, tmp[:4]...)
+		buf = append(buf, encodedKeys[i]...)
+		coding.PutUint64(tmp[:], entry.offset)
+		buf = append(buf, tmp[:]...)
+		coding.PutUint32(tmp[:4], entry.size)
+		buf = append(buf, tmp[:4]...)
 	}
 
 	// Append CRC32C trailer
 	crc := checksum.CRC32C(buf)
-	trailer := make([]byte, checksumSize)
-	coding.PutUint32(trailer, crc)
-	buf = append(buf, trailer...)
+	coding.PutUint32(tmp[:4], crc)
+	buf = append(buf, tmp[:4]...)
 
 	return buf
 }
 
-// estimatedEntrySize returns an approximation of the key + value sizes in the block
-func estimatedEntrySize(key keys.InternalKey, value []byte) int {
-	// 4 (key len prefix) + userKey + 8 (seqno) + 1 (kind) + 4 (value len prefix) + value
+// encodedEntrySize returns the exact on-disk size of one entry in a data block.
+// Format: [keyLen:4][encodedKey][valueLen:4][value]
+// encodedKey = userKey + seqno(8) + kind(1), so its length is len(userKey) + 9.
+func encodedEntrySize(key keys.InternalKey, value []byte) int {
 	return 4 + len(key.UserKey) + 9 + 4 + len(value)
 }

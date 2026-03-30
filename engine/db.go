@@ -59,7 +59,7 @@ func Open(dir string, opts ...Option) (*DB, error) {
 	// Create the WAL writer
 	writer, err := wal.NewWriter(walFilePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("beachdb: creating WAL writer: %w", err)
 	}
 	db.wal = writer
 
@@ -98,7 +98,7 @@ func (db *DB) Write(ctx context.Context, b *Batch) error {
 
 	err := db.wal.Append(encoded)
 	if err != nil {
-		return err
+		return fmt.Errorf("beachdb: appending to WAL: %w", err)
 	}
 
 	// Check whether we should fsync the WAL on write or not
@@ -110,7 +110,7 @@ func (db *DB) Write(ctx context.Context, b *Batch) error {
 
 		err = db.wal.Sync()
 		if err != nil {
-			return err
+			return fmt.Errorf("beachdb: syncing WAL: %w", err)
 		}
 	}
 
@@ -173,7 +173,10 @@ func (db *DB) Close() error {
 	db.wal = nil
 	db.mem = nil
 
-	return err
+	if err != nil {
+		return fmt.Errorf("beachdb: closing WAL: %w", err)
+	}
+	return nil
 }
 
 // applyBatch takes a batch struct and applies it to db.mem

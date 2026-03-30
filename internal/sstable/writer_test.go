@@ -297,9 +297,17 @@ func TestBlockBuilder_EmptyValue(t *testing.T) {
 
 	// Parse and verify value length is 0
 	br := coding.NewByteReader(payload)
-	keyLen, _ := br.ReadUint32()
-	_, _ = br.ReadBytes(int(keyLen))
-	valLen, _ := br.ReadUint32()
+	keyLen, err := br.ReadUint32()
+	if err != nil {
+		t.Fatalf("reading key length: %v", err)
+	}
+	if _, err = br.ReadBytes(int(keyLen)); err != nil {
+		t.Fatalf("reading key bytes: %v", err)
+	}
+	valLen, err := br.ReadUint32()
+	if err != nil {
+		t.Fatalf("reading value length: %v", err)
+	}
 
 	if valLen != 0 {
 		t.Fatalf("expected value length 0, got %d", valLen)
@@ -627,7 +635,7 @@ func TestWriter_BlockChecksumsPresent(t *testing.T) {
 
 func TestFooter_EncodeDecodeRoundTrip(t *testing.T) {
 	f := newFooter(12345, 678, 5, 100)
-	encoded := f.Encode()
+	encoded := f.encode()
 
 	if len(encoded) != footerSize {
 		t.Fatalf("encoded footer size: want %d, got %d", footerSize, len(encoded))
@@ -654,7 +662,7 @@ func TestFooter_EncodeDecodeRoundTrip(t *testing.T) {
 
 func TestFooter_DecodeRejectsBadMagic(t *testing.T) {
 	f := newFooter(0, 4, 0, 0)
-	encoded := f.Encode()
+	encoded := f.encode()
 	encoded[0] = 'X'
 
 	_, err := decodeFooter(encoded)
@@ -665,7 +673,7 @@ func TestFooter_DecodeRejectsBadMagic(t *testing.T) {
 
 func TestFooter_DecodeRejectsBadVersion(t *testing.T) {
 	f := newFooter(0, 4, 0, 0)
-	encoded := f.Encode()
+	encoded := f.encode()
 	// Set version to 99, recompute checksum so it passes
 	coding.PutUint32(encoded[8:], 99)
 	coding.PutUint32(encoded[36:], checksum.CRC32C(encoded[:36]))
@@ -678,7 +686,7 @@ func TestFooter_DecodeRejectsBadVersion(t *testing.T) {
 
 func TestFooter_DecodeRejectsBadChecksum(t *testing.T) {
 	f := newFooter(0, 4, 0, 0)
-	encoded := f.Encode()
+	encoded := f.encode()
 	// Corrupt a data byte without updating checksum
 	encoded[20] ^= 0xFF
 
@@ -736,10 +744,21 @@ func TestWriter_FileLayoutOrder(t *testing.T) {
 	var prevEnd uint64
 	blockIdx := 0
 	for br.Remaining() > 0 {
-		keyLen, _ := br.ReadUint32()
-		_, _ = br.ReadBytes(int(keyLen))
-		offset, _ := br.ReadUint64()
-		size, _ := br.ReadUint32()
+		keyLen, err := br.ReadUint32()
+		if err != nil {
+			t.Fatalf("block %d: reading key length: %v", blockIdx, err)
+		}
+		if _, err = br.ReadBytes(int(keyLen)); err != nil {
+			t.Fatalf("block %d: reading key bytes: %v", blockIdx, err)
+		}
+		offset, err := br.ReadUint64()
+		if err != nil {
+			t.Fatalf("block %d: reading offset: %v", blockIdx, err)
+		}
+		size, err := br.ReadUint32()
+		if err != nil {
+			t.Fatalf("block %d: reading size: %v", blockIdx, err)
+		}
 
 		if offset != prevEnd {
 			t.Fatalf("block %d: expected offset %d, got %d (blocks not contiguous)",
@@ -821,17 +840,30 @@ func TestWriter_RandomizedEntries(t *testing.T) {
 	idxPayload := indexData[:len(indexData)-checksumSize]
 	br := coding.NewByteReader(idxPayload)
 
+	blockIdx := 0
 	for br.Remaining() > 0 {
-		keyLen, _ := br.ReadUint32()
-		_, _ = br.ReadBytes(int(keyLen))
-		blockOffset, _ := br.ReadUint64()
-		blockSize, _ := br.ReadUint32()
+		keyLen, err := br.ReadUint32()
+		if err != nil {
+			t.Fatalf("block %d: reading key length: %v", blockIdx, err)
+		}
+		if _, err = br.ReadBytes(int(keyLen)); err != nil {
+			t.Fatalf("block %d: reading key bytes: %v", blockIdx, err)
+		}
+		blockOffset, err := br.ReadUint64()
+		if err != nil {
+			t.Fatalf("block %d: reading offset: %v", blockIdx, err)
+		}
+		blockSize, err := br.ReadUint32()
+		if err != nil {
+			t.Fatalf("block %d: reading size: %v", blockIdx, err)
+		}
 
 		block := data[blockOffset : blockOffset+uint64(blockSize)]
 		payload := block[:len(block)-checksumSize]
 		stored := coding.Uint32(block[len(block)-checksumSize:])
 		if stored != checksum.CRC32C(payload) {
-			t.Fatal("data block checksum mismatch in randomized test")
+			t.Fatalf("block %d: checksum mismatch in randomized test", blockIdx)
 		}
+		blockIdx++
 	}
 }

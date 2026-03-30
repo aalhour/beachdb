@@ -29,7 +29,9 @@ func newFooter(indexOffset uint64, indexSize uint32, dataBlockCount uint32, entr
 	}
 }
 
-func (f *footer) Encode() []byte {
+// Encode encodes a footer struct, computes its checksum and
+// returns a final byte array with all parts
+func (f *footer) encode() []byte {
 	// Footer format
 	// [magic:8][version:4][indexOffset:8][indexSize:4][dataBlockCount:4][entryCount:8][checksum:4]
 
@@ -57,6 +59,8 @@ func (f *footer) Encode() []byte {
 	return buf
 }
 
+// DecodeFooter takes raw footer data byte and decodes it into
+// a footer struct and verifies its magic, version and checksum parts
 func decodeFooter(data []byte) (footer, error) {
 	if len(data) != footerSize {
 		return footer{}, ErrCorruptFooter
