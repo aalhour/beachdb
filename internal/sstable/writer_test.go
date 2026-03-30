@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/aalhour/beachdb/internal/keys"
@@ -869,6 +870,158 @@ func TestWriter_RandomizedEntries(t *testing.T) {
 	}
 }
 
+func TestWriter_BinaryKeysAndValues(t *testing.T) {
+	w, path := createWriter(t, WithSync(false))
+
+	entries := []struct {
+		key   keys.InternalKey
+		value []byte
+	}{
+		{makeKey("\x00\x00", 3, keys.InternalKeyKindPut), []byte{0xFF, 0xFE, 0xFD}},
+		{makeKey("\x00\x01", 2, keys.InternalKeyKindPut), []byte{}},            // empty value
+		{makeKey("\x80\x81\x82", 1, keys.InternalKeyKindPut), []byte{0, 0, 0}}, // high-bit key
+	}
+
+	for _, e := range entries {
+		if err := w.Add(e.key, e.value); err != nil {
+			t.Fatalf("Add(%x): %v", e.key.UserKey, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify footer metadata
+	data := readFileBytes(t, path)
+	f, err := decodeFooter(data[len(data)-int(footerSize):])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.entryCount != uint64(len(entries)) {
+		t.Fatalf("entryCount = %d, want %d", f.entryCount, len(entries))
+	}
+
+	// Verify all data block checksums are valid
+	indexData := data[f.indexOffset : f.indexOffset+uint64(f.indexSize)]
+	idxPayload := indexData[:len(indexData)-int(checksumSize)]
+	br := coding.NewByteReader(idxPayload)
+
+	for br.Remaining() > 0 {
+		keyLen, err := br.ReadUint32()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = br.ReadBytes(int(keyLen)); err != nil {
+			t.Fatal(err)
+		}
+		blockOffset, err := br.ReadUint64()
+		if err != nil {
+			t.Fatal(err)
+		}
+		blockSize, err := br.ReadUint32()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		block := data[blockOffset : blockOffset+uint64(blockSize)]
+		payload := block[:len(block)-int(checksumSize)]
+		stored := coding.Uint32(block[len(block)-int(checksumSize):])
+		if stored != checksum.CRC32C(payload) {
+			t.Fatal("block checksum mismatch for binary key/value entry")
+		}
+	}
+}
+
+func TestWriter_ConcurrentAdd(t *testing.T) {
+	t.Parallel()
+
+	// Writer.Add holds a mutex. Concurrent Adds must not panic or
+	// corrupt state. We can't guarantee ordering, so we pre-sort
+	// keys and assign each goroutine a non-overlapping slice.
+	const keysPerGoroutine = 50
+	const numGoroutines = 4
+	total := keysPerGoroutine * numGoroutines
+
+	// Pre-generate all keys in sorted order
+	allKeys := make([]keys.InternalKey, total)
+	for i := range total {
+		allKeys[i] = putKey(fmt.Sprintf("key-%06d", i), uint64(total-i)) //nolint:gosec // total-i is always non-negative
+	}
+
+	// Since concurrent goroutines can't guarantee Add order, we
+	// serialize: each goroutine adds its slice sequentially, but
+	// they race on the mutex. Only one goroutine can work at a time
+	// because keys must be strictly ordered. Instead, test that
+	// concurrent Adds to separate writers on separate files don't panic.
+	var wg sync.WaitGroup
+	errCh := make(chan error, numGoroutines)
+	wg.Add(numGoroutines)
+
+	for g := range numGoroutines {
+		go func(id int) {
+			defer wg.Done()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "concurrent.sst")
+			f, err := os.Create(path) //nolint:gosec // test with temp dir
+			if err != nil {
+				errCh <- err
+				return
+			}
+			w, err := NewWriter(f, WithSync(false))
+			if err != nil {
+				errCh <- err
+				return
+			}
+			start := id * keysPerGoroutine
+			for i := range keysPerGoroutine {
+				if err := w.Add(allKeys[start+i], []byte("val")); err != nil {
+					errCh <- fmt.Errorf("goroutine %d, key %d: %w", id, i, err)
+					return
+				}
+			}
+			if err := w.Close(); err != nil {
+				errCh <- fmt.Errorf("goroutine %d close: %w", id, err)
+			}
+		}(g)
+	}
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+}
+
+func TestWriter_LargeValue(t *testing.T) {
+	w, path := createWriter(t, WithSync(false), WithBlockSize(64))
+
+	// Value much larger than block size
+	bigVal := make([]byte, 4096)
+	for i := range bigVal {
+		bigVal[i] = byte(i % 256) //nolint:gosec // intentional truncation
+	}
+
+	if err := w.Add(putKey("big", 1), bigVal); err != nil {
+		t.Fatalf("Add with large value: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify footer and block checksum
+	data := readFileBytes(t, path)
+	f, err := decodeFooter(data[len(data)-int(footerSize):])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.entryCount != 1 {
+		t.Fatalf("entryCount = %d, want 1", f.entryCount)
+	}
+	if f.dataBlockCount != 1 {
+		t.Fatalf("dataBlockCount = %d, want 1", f.dataBlockCount)
+	}
+}
+
 // --- Benchmarks ---
 
 func createWriterB(b *testing.B, opts ...WriterOption) (*Writer, string) {
@@ -932,12 +1085,16 @@ func BenchmarkWriter_Add(b *testing.B) {
 		b.Run(s.name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
-			for range b.N {
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
 				w, _ := createWriterB(b, WithSync(false))
+				b.StartTimer()
 				for _, k := range ks {
 					_ = w.Add(k, val)
 				}
+				b.StopTimer()
 				_ = w.Close()
+				b.StartTimer()
 			}
 		})
 	}

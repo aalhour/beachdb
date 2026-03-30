@@ -924,37 +924,39 @@ func BenchmarkReader_Next(b *testing.B) {
 		{"medium-1KB", 1024},
 		{"large-64KB", 64 * 1024},
 	}
+	const numRecords = 100
 	for _, s := range sizes {
 		payload := make([]byte, s.size)
 		b.Run(s.name, func(b *testing.B) {
-			// Write N records to a WAL file, then benchmark reading them back
+			// Pre-write a fixed number of records
 			path := filepath.Join(b.TempDir(), "bench.wal")
 			w, err := NewWriter(path)
 			if err != nil {
 				b.Fatal(err)
 			}
-			for i := 0; i < b.N; i++ {
+			for i := range numRecords {
 				if err := w.Append(payload); err != nil {
-					b.Fatalf("Append: %v", err)
+					b.Fatalf("Append record %d: %v", i, err)
 				}
 			}
 			if err := w.Close(); err != nil {
 				b.Fatal(err)
 			}
 
-			r, err := NewReader(path)
-			if err != nil {
-				b.Fatal(err)
-			}
-			defer r.Close()
-
 			b.ReportAllocs()
 			b.ResetTimer()
-			for {
-				_, err := r.Next()
+			for i := 0; i < b.N; i++ {
+				r, err := NewReader(path)
 				if err != nil {
-					break
+					b.Fatal(err)
 				}
+				for {
+					_, err := r.Next()
+					if err != nil {
+						break
+					}
+				}
+				r.Close()
 			}
 		})
 	}

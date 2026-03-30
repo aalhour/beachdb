@@ -494,10 +494,8 @@ func BenchmarkDecodeRecordHeader(b *testing.B) {
 	record := EncodeRecord(payload)
 	header := record[:recordHeaderSize]
 
-	b.ResetTimer()
 	b.ReportAllocs()
-	//nolint:modernize // bloop: b.Loop() API not available in current Go version
-	for range b.N {
+	for b.Loop() {
 		_, _, _ = DecodeRecordHeader(header)
 	}
 }

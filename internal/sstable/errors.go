@@ -6,6 +6,9 @@ var (
 	// ErrWriterClosed is returned when Add or Close is called on a closed writer.
 	ErrWriterClosed = errors.New("beachdb/sstable: writer is closed")
 
+	// ErrReaderClosed is returned when Close is called on a closed reader.
+	ErrReaderClosed = errors.New("beachdb/sstable: reader is closed")
+
 	// ErrOutOfOrderKey is returned when Add receives a key that sorts before the previous key.
 	ErrOutOfOrderKey = errors.New("beachdb/sstable: keys must be added in sorted order")
 
@@ -20,6 +23,9 @@ var (
 
 	// ErrReadingFile is returned when the file couldn't be read or stat'd.
 	ErrReadingFile = errors.New("beachdb/sstable: couldn't read file")
+
+	// ErrReaderClosingFile is returned when reader couldn't close the file.
+	ErrReaderClosingFile = errors.New("beachdb/sstable: reader couldn't close file")
 
 	// ErrBadMagic is returned when the footer magic does not match the SSTable format.
 	ErrBadMagic = errors.New("beachdb/sstable: invalid magic number")
@@ -36,8 +42,11 @@ var (
 	// ErrCorruptBlock is returned when a data block cannot be parsed or verified.
 	ErrCorruptBlock = errors.New("beachdb/sstable: corrupt data block")
 
-	// ErrChecksumMismatch is returned when a block's CRC does not match its data.
-	ErrChecksumMismatch = errors.New("beachdb/sstable: block checksum mismatch")
+	// ErrIndexChecksumMismatch is returned when an index's CRC does not match its data.
+	ErrIndexChecksumMismatch = errors.New("beachdb/sstable: index checksum mismatch")
+
+	// ErrBlockChecksumMismatch is returned when a block's CRC does not match its data.
+	ErrBlockChecksumMismatch = errors.New("beachdb/sstable: block checksum mismatch")
 
 	// ErrKeyNotFound is returned when Get finds no entry for the key in the table.
 	ErrKeyNotFound = errors.New("beachdb/sstable: key not found")
