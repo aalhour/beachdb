@@ -912,3 +912,50 @@ func ExampleReader() {
 	}
 	// Output:
 }
+
+// --- Benchmarks ---
+
+func BenchmarkReader_Next(b *testing.B) {
+	sizes := []struct {
+		name string
+		size int
+	}{
+		{"small-64B", 64},
+		{"medium-1KB", 1024},
+		{"large-64KB", 64 * 1024},
+	}
+	for _, s := range sizes {
+		payload := make([]byte, s.size)
+		b.Run(s.name, func(b *testing.B) {
+			// Write N records to a WAL file, then benchmark reading them back
+			path := filepath.Join(b.TempDir(), "bench.wal")
+			w, err := NewWriter(path)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for i := 0; i < b.N; i++ {
+				if err := w.Append(payload); err != nil {
+					b.Fatalf("Append: %v", err)
+				}
+			}
+			if err := w.Close(); err != nil {
+				b.Fatal(err)
+			}
+
+			r, err := NewReader(path)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer r.Close()
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for {
+				_, err := r.Next()
+				if err != nil {
+					break
+				}
+			}
+		})
+	}
+}

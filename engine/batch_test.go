@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -588,4 +589,55 @@ func ExampleDecodeBatch() {
 	}
 	_ = decoded
 	// Output:
+}
+
+// --- Benchmarks ---
+
+func BenchmarkBatch_Encode(b *testing.B) {
+	sizes := []struct {
+		name string
+		ops  int
+	}{
+		{"1-op", 1},
+		{"10-ops", 10},
+		{"100-ops", 100},
+	}
+	for _, s := range sizes {
+		batch := NewBatch()
+		for i := range s.ops {
+			batch.Put(fmt.Appendf(nil, "key-%06d", i), []byte("value"))
+		}
+		b.Run(s.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = batch.Encode()
+			}
+		})
+	}
+}
+
+func BenchmarkBatch_Decode(b *testing.B) {
+	sizes := []struct {
+		name string
+		ops  int
+	}{
+		{"1-op", 1},
+		{"10-ops", 10},
+		{"100-ops", 100},
+	}
+	for _, s := range sizes {
+		batch := NewBatch()
+		for i := range s.ops {
+			batch.Put(fmt.Appendf(nil, "key-%06d", i), []byte("value"))
+		}
+		encoded := batch.Encode()
+		b.Run(s.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, _ = DecodeBatch(encoded)
+			}
+		})
+	}
 }

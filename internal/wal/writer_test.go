@@ -878,6 +878,38 @@ func TestWriter_Close_NoPanic(t *testing.T) {
 	})
 }
 
+// --- Benchmarks ---
+
+func BenchmarkWriter_Append(b *testing.B) {
+	sizes := []struct {
+		name string
+		size int
+	}{
+		{"empty", 0},
+		{"small-64B", 64},
+		{"medium-1KB", 1024},
+		{"large-64KB", 64 * 1024},
+	}
+	for _, s := range sizes {
+		payload := make([]byte, s.size)
+		b.Run(s.name, func(b *testing.B) {
+			path := filepath.Join(b.TempDir(), "bench.wal")
+			w, err := NewWriter(path)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer w.Close()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := w.Append(payload); err != nil {
+					b.Fatalf("Append: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // ExampleWriter demonstrates basic WAL writer usage.
 func ExampleWriter() {
 	path := "/tmp/example.wal"

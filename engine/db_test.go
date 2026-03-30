@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -1102,5 +1103,81 @@ func TestDB_CrashRecovery_WithMemtable(t *testing.T) {
 	}
 	if db.seqno != seqnoBeforeClose+1 {
 		t.Errorf("seqno after new write = %d, want %d", db.seqno, seqnoBeforeClose+1)
+	}
+}
+
+// --- Benchmarks ---
+
+func BenchmarkDB_Put(b *testing.B) {
+	dir := b.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		b.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	key := []byte("bench-key")
+	val := []byte("bench-value")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := db.Put(ctx, key, val); err != nil {
+			b.Fatalf("Put: %v", err)
+		}
+	}
+}
+
+func BenchmarkDB_Get(b *testing.B) {
+	dir := b.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		b.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	key := []byte("bench-key")
+	if err := db.Put(ctx, key, []byte("bench-value")); err != nil {
+		b.Fatalf("Put: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = db.Get(ctx, key)
+	}
+}
+
+func BenchmarkDB_Write_Batch(b *testing.B) {
+	sizes := []struct {
+		name string
+		ops  int
+	}{
+		{"1-op", 1},
+		{"10-ops", 10},
+		{"100-ops", 100},
+	}
+	for _, s := range sizes {
+		b.Run(s.name, func(b *testing.B) {
+			dir := b.TempDir()
+			db, err := Open(dir, WithSync(false))
+			if err != nil {
+				b.Fatalf("Open: %v", err)
+			}
+			defer db.Close()
+
+			ctx := context.Background()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				batch := NewBatch()
+				for j := range s.ops {
+					batch.Put(fmt.Appendf(nil, "k%06d", j), []byte("value"))
+				}
+				if err := db.Write(ctx, batch); err != nil {
+					b.Fatalf("Write: %v", err)
+				}
+			}
+		})
 	}
 }

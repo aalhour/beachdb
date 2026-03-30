@@ -149,3 +149,48 @@ func TestMissingDirs_PathComponentIsFile(t *testing.T) {
 		t.Fatal("expected error when path component is a file, got nil")
 	}
 }
+
+// --- Benchmarks ---
+
+func BenchmarkSyncDir(b *testing.B) {
+	dir := b.TempDir()
+	// Create a file in the directory to simulate typical usage
+	if err := os.WriteFile(filepath.Join(dir, "test.wal"), []byte("data"), 0600); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := syncDir(dir); err != nil {
+			b.Fatalf("syncDir: %v", err)
+		}
+	}
+}
+
+func BenchmarkMkdirAllAndSync(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		dir := filepath.Join(b.TempDir(), "sub", "dir")
+		b.StartTimer()
+		if err := mkdirAllAndSync(dir); err != nil {
+			b.Fatalf("mkdirAllAndSync: %v", err)
+		}
+	}
+}
+
+func BenchmarkMissingDirs(b *testing.B) {
+	// A path where most parents already exist
+	root := b.TempDir()
+	existing := filepath.Join(root, "a", "b")
+	if err := os.MkdirAll(existing, 0750); err != nil {
+		b.Fatal(err)
+	}
+	target := filepath.Join(existing, "c", "d", "e")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = missingDirs(target)
+	}
+}

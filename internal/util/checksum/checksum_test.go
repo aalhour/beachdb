@@ -1,6 +1,8 @@
 package checksum
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestCRC32C(t *testing.T) {
 	tests := []struct {
@@ -48,6 +50,32 @@ func TestCRC32C(t *testing.T) {
 					"CRC32C(%v) = 0x%x; want 0x%x",
 					test.data, got, test.want,
 				)
+			}
+		})
+	}
+}
+
+// --- Benchmarks ---
+
+func BenchmarkCRC32C(b *testing.B) {
+	sizes := []struct {
+		name string
+		size int
+	}{
+		{"empty", 0},
+		{"small-64B", 64},
+		{"medium-1KB", 1024},
+		{"block-4KB", 4 * 1024},
+		{"large-64KB", 64 * 1024},
+	}
+	for _, s := range sizes {
+		data := make([]byte, s.size)
+		b.Run(s.name, func(b *testing.B) {
+			b.SetBytes(int64(s.size))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = CRC32C(data)
 			}
 		})
 	}

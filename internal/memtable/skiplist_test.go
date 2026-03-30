@@ -1,6 +1,7 @@
 package memtable
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"testing"
@@ -1051,5 +1052,70 @@ func TestFindPredecessors_OnEmptyAfterInit(t *testing.T) {
 		if p != sl.head {
 			t.Errorf("preds[%d] = %v, want head", i, p)
 		}
+	}
+}
+
+// --- Benchmarks ---
+
+func BenchmarkSkipList_Put(b *testing.B) {
+	counts := []int{100, 1000, 10000}
+	for _, n := range counts {
+		// Pre-generate keys outside the timed loop
+		ks := make([]keys.InternalKey, n)
+		vals := make([][]byte, n)
+		for i := range n {
+			ks[i] = keys.InternalKey{
+				UserKey: fmt.Appendf(nil, "key-%08d", i),
+				Seqno:   uint64(i + 1),
+				Kind:    keys.InternalKeyKindPut,
+			}
+			vals[i] = fmt.Appendf(nil, "val-%08d", i)
+		}
+		b.Run(fmt.Sprintf("%d-entries", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				sl := NewSkipList()
+				for j := range n {
+					sl.Put(ks[j], vals[j])
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkSkipList_Get_Hit(b *testing.B) {
+	const n = 1000
+	sl := NewSkipList()
+	for i := range n {
+		sl.Put(keys.InternalKey{
+			UserKey: fmt.Appendf(nil, "key-%08d", i),
+			Seqno:   uint64(i + 1),
+			Kind:    keys.InternalKeyKindPut,
+		}, []byte("value"))
+	}
+	target := []byte("key-00000500")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = sl.Get(target, uint64(n))
+	}
+}
+
+func BenchmarkSkipList_Get_Miss(b *testing.B) {
+	const n = 1000
+	sl := NewSkipList()
+	for i := range n {
+		sl.Put(keys.InternalKey{
+			UserKey: fmt.Appendf(nil, "key-%08d", i),
+			Seqno:   uint64(i + 1),
+			Kind:    keys.InternalKeyKindPut,
+		}, []byte("value"))
+	}
+	target := []byte("zzz-missing-key")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = sl.Get(target, uint64(n))
 	}
 }
