@@ -95,7 +95,7 @@ func (r *Reader) Close() error {
 	return nil
 }
 
-// Get scans the SSTable for the give userkey + seqno and returns its
+// Get scans the SSTable for the given userkey + seqno and returns its
 // value, if found; otherwise, error.
 func (r *Reader) Get(userKey []byte, seqno uint64) ([]byte, error) {
 	r.mu.RLock()
@@ -127,44 +127,22 @@ func (r *Reader) Get(userKey []byte, seqno uint64) ([]byte, error) {
 			return nil, err
 		}
 
-		// Iterate over all entries in the block
-		foundUserKey := false
-		for _, entry := range entries {
-			// Compare the user key bytes and seqno for strict "newer" constraint
-			if bytes.Equal(entry.key.UserKey, userKey) {
-				// Key was found
-				foundUserKey = true
-
-				// Check that the seqno of found key is strictly newer than
-				// the target seqnoß
-				if entry.key.Seqno <= seqno {
-					// If the newest key we found is deleted, return key not found error
-					if entry.key.Kind == keys.InternalKeyKindDelete {
-						return nil, ErrKeyNotFound
-					}
-					// Else return a clone of the value
-					return slices.Clone(entry.value), nil
-				}
-			}
-		}
-
-		// If we never saw this user key in the block, it doesn't exist
-		if !foundUserKey {
+		val, found, err := scanBlock(entries, userKey, seqno)
+		if !found {
 			return nil, ErrKeyNotFound
 		}
-
+		if err != nil || val != nil {
+			return val, err
+		}
 		blockIndex++
 	}
 
-	// If we got here that means the entries are either empty
-	// or no matching user key was found
 	return nil, ErrKeyNotFound
 }
 
+// seekBlock binary searches the index to find the first block
+// whose lastKey >= the synthetic max key for userKey.
 func (r *Reader) seekBlock(userKey []byte) int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	// Construct the biggest internal key (max seqno) for
 	// this user key
 	synthetic := maxLookupKey(userKey)
@@ -176,10 +154,9 @@ func (r *Reader) seekBlock(userKey []byte) int {
 	})
 }
 
+// readBlock reads a data block at the given offset and size,
+// verifies its checksum, and returns the payload bytes.
 func (r *Reader) readBlock(offset uint64, size uint32) ([]byte, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	// Use file.ReadAt which maps to `pread(2) on Unix, the operation
 	// doesn't mutate the file's single shared seek position and is
 	// goroutine safe
@@ -356,6 +333,29 @@ func decodeBlockEntries(payload []byte) ([]blockEntry, error) {
 	return entries, nil
 }
 
+// scanBlock scans decoded entries for the newest visible version of userKey.
+// Returns (value, true, nil) on a visible put, (nil, true, ErrKeyNotFound)
+// on a visible tombstone, (nil, true, nil) if the key is present but no
+// version is visible yet, and (nil, false, nil) if the key is absent.
+func scanBlock(entries []blockEntry, userKey []byte, seqno uint64) ([]byte, bool, error) {
+	found := false
+	for _, entry := range entries {
+		if !bytes.Equal(entry.key.UserKey, userKey) {
+			continue
+		}
+		found = true
+		if entry.key.Seqno <= seqno {
+			if entry.key.Kind == keys.InternalKeyKindDelete {
+				return nil, true, ErrKeyNotFound
+			}
+			return slices.Clone(entry.value), true, nil
+		}
+	}
+	return nil, found, nil
+}
+
+// maxLookupKey constructs a synthetic internal key with the maximum
+// seqno so that it sorts before all real entries for the same user key.
 func maxLookupKey(userKey []byte) keys.InternalKey {
 	return keys.InternalKey{
 		UserKey: userKey,
