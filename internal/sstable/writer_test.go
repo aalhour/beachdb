@@ -1022,7 +1022,21 @@ func TestWriter_LargeValue(t *testing.T) {
 	}
 }
 
-// --- Benchmarks ---
+// --- Benchmark helpers ---
+
+// Value sizes used across benchmarks: small (64B) and large (4KB).
+var (
+	benchValSmall = make([]byte, 64)
+	benchValLarge = make([]byte, 4096)
+)
+
+var benchValSizes = []struct {
+	name string
+	val  []byte
+}{
+	{"val-64B", benchValSmall},
+	{"val-4KB", benchValLarge},
+}
 
 func createWriterB(b *testing.B, opts ...WriterOption) (*Writer, string) {
 	b.Helper()
@@ -1039,35 +1053,72 @@ func createWriterB(b *testing.B, opts ...WriterOption) (*Writer, string) {
 	return w, path
 }
 
+// writeBenchSSTable writes an SSTable with count sorted entries and returns
+// the path. Keys are formatted as "key-XXXXXXXX" with descending seqnos.
+func writeBenchSSTable(b *testing.B, count int, val []byte) string {
+	b.Helper()
+	w, path := createWriterB(b, WithSync(false))
+	for i := range count {
+		k := putKey(fmt.Sprintf("key-%08d", i), uint64(count-i)) //nolint:gosec // count-i is always non-negative
+		if err := w.Add(k, val); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		b.Fatal(err)
+	}
+	return path
+}
+
+func openReaderB(b *testing.B, path string) *Reader {
+	b.Helper()
+	f, err := os.Open(path) //nolint:gosec // bench helper with temp dir
+	if err != nil {
+		b.Fatal(err)
+	}
+	r, err := OpenReader(f)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return r
+}
+
+// --- Writer benchmarks ---
+
 func BenchmarkBlockBuilder_Add(b *testing.B) {
-	bb := newBlockBuilder()
 	key := putKey("benchmark-key", 1)
-	val := make([]byte, 64)
-	// Warm up so the backing buffer is already allocated
-	bb.Add(key, val)
-	bb.Reset()
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
-		bb.Add(key, val)
+	for _, vs := range benchValSizes {
+		b.Run(vs.name, func(b *testing.B) {
+			bb := newBlockBuilder()
+			bb.Add(key, vs.val)
+			bb.Reset()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				bb.Add(key, vs.val)
+			}
+		})
 	}
 }
 
 func BenchmarkBlockBuilder_Finish(b *testing.B) {
-	val := make([]byte, 32)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
-		bb := newBlockBuilder()
-		for i := range 10 {
-			bb.Add(putKey(fmt.Sprintf("k%02d", i), uint64(100-i)), val)
-		}
-		_ = bb.Finish()
+	for _, vs := range benchValSizes {
+		b.Run(vs.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				bb := newBlockBuilder()
+				for i := range 10 {
+					bb.Add(putKey(fmt.Sprintf("k%02d", i), uint64(100-i)), vs.val)
+				}
+				_ = bb.Finish()
+			}
+		})
 	}
 }
 
 func BenchmarkWriter_Add(b *testing.B) {
-	sizes := []struct {
+	counts := []struct {
 		name  string
 		count int
 	}{
@@ -1075,28 +1126,59 @@ func BenchmarkWriter_Add(b *testing.B) {
 		{"100-entries", 100},
 		{"1000-entries", 1000},
 	}
-	val := make([]byte, 32)
-	for _, s := range sizes {
-		// Pre-generate keys outside the timed loop
-		ks := make([]keys.InternalKey, s.count)
-		for i := range s.count {
-			ks[i] = putKey(fmt.Sprintf("key-%08d", i), uint64(s.count-i)) //nolint:gosec // count-i is always non-negative
-		}
-		b.Run(s.name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				b.StopTimer()
-				w, _ := createWriterB(b, WithSync(false))
-				b.StartTimer()
-				for _, k := range ks {
-					_ = w.Add(k, val)
-				}
-				b.StopTimer()
-				_ = w.Close()
-				b.StartTimer()
+	for _, vs := range benchValSizes {
+		for _, s := range counts {
+			ks := make([]keys.InternalKey, s.count)
+			for i := range s.count {
+				ks[i] = putKey(fmt.Sprintf("key-%08d", i), uint64(s.count-i)) //nolint:gosec // count-i is always non-negative
 			}
-		})
+			b.Run(vs.name+"/"+s.name, func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					b.StopTimer()
+					w, _ := createWriterB(b, WithSync(false))
+					b.StartTimer()
+					for _, k := range ks {
+						_ = w.Add(k, vs.val)
+					}
+					b.StopTimer()
+					_ = w.Close()
+					b.StartTimer()
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkWriter_Close(b *testing.B) {
+	counts := []struct {
+		name  string
+		count int
+	}{
+		{"100-entries", 100},
+		{"1000-entries", 1000},
+	}
+	for _, vs := range benchValSizes {
+		for _, s := range counts {
+			ks := make([]keys.InternalKey, s.count)
+			for i := range s.count {
+				ks[i] = putKey(fmt.Sprintf("key-%08d", i), uint64(s.count-i)) //nolint:gosec // count-i is always non-negative
+			}
+			b.Run(vs.name+"/"+s.name, func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					b.StopTimer()
+					w, _ := createWriterB(b, WithSync(false))
+					for _, k := range ks {
+						_ = w.Add(k, vs.val)
+					}
+					b.StartTimer()
+					_ = w.Close()
+				}
+			})
+		}
 	}
 }
 
@@ -1119,13 +1201,243 @@ func BenchmarkFooter_Decode(b *testing.B) {
 	}
 }
 
+// --- Index codec benchmarks ---
+
+func BenchmarkBuildIndexBlock(b *testing.B) {
+	counts := []int{10, 100, 1000}
+	for _, n := range counts {
+		entries := make([]indexEntry, n)
+		for i := range n {
+			entries[i] = indexEntry{
+				lastKey: putKey(fmt.Sprintf("key-%08d", i), 1),
+				offset:  uint64(i) * 4096,
+				size:    4096,
+			}
+		}
+		b.Run(fmt.Sprintf("%d-entries", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				_ = buildIndexBlock(entries)
+			}
+		})
+	}
+}
+
+func BenchmarkDecodeIndexBlock(b *testing.B) {
+	counts := []int{10, 100, 1000}
+	for _, n := range counts {
+		entries := make([]indexEntry, n)
+		for i := range n {
+			entries[i] = indexEntry{
+				lastKey: putKey(fmt.Sprintf("key-%08d", i), 1),
+				offset:  uint64(i) * 4096,
+				size:    4096,
+			}
+		}
+		encoded := buildIndexBlock(entries)
+		b.Run(fmt.Sprintf("%d-entries", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				_, _ = decodeIndexBlock(encoded)
+			}
+		})
+	}
+}
+
+// --- Block decode benchmark ---
+
+func BenchmarkDecodeBlockEntries(b *testing.B) {
+	for _, vs := range benchValSizes {
+		bb := newBlockBuilder()
+		for i := range 50 {
+			bb.Add(putKey(fmt.Sprintf("key-%04d", i), uint64(50-i)), vs.val)
+		}
+		raw := bb.Finish()
+		payload, err := verifyBlockChecksum(raw)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Run(vs.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				_, _ = decodeBlockEntries(payload)
+			}
+		})
+	}
+}
+
+// --- Reader benchmarks ---
+
+func BenchmarkReader_Open(b *testing.B) {
+	counts := []struct {
+		name  string
+		count int
+	}{
+		{"100-entries", 100},
+		{"1000-entries", 1000},
+		{"10000-entries", 10000},
+	}
+	for _, s := range counts {
+		path := writeBenchSSTable(b, s.count, benchValSmall)
+		b.Run(s.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				f, err := os.Open(path) //nolint:gosec // bench helper
+				if err != nil {
+					b.Fatal(err)
+				}
+				r, err := OpenReader(f)
+				if err != nil {
+					b.Fatal(err)
+				}
+				r.Close()
+			}
+		})
+	}
+}
+
+func BenchmarkReader_Get(b *testing.B) {
+	counts := []struct {
+		name  string
+		count int
+	}{
+		{"100-entries", 100},
+		{"1000-entries", 1000},
+		{"10000-entries", 10000},
+	}
+	for _, vs := range benchValSizes {
+		for _, s := range counts {
+			path := writeBenchSSTable(b, s.count, vs.val)
+			r := openReaderB(b, path)
+
+			// Pre-compute a lookup key in the middle of the table
+			hitKey := fmt.Appendf(nil, "key-%08d", s.count/2)
+			missKey := []byte("key-zzzzzzzz")
+			seqno := uint64(s.count) //nolint:gosec // bench count is small
+
+			b.Run(vs.name+"/"+s.name+"/hit", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					_, _ = r.Get(hitKey, seqno)
+				}
+			})
+			b.Run(vs.name+"/"+s.name+"/miss", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					_, _ = r.Get(missKey, seqno)
+				}
+			})
+
+			r.Close()
+		}
+	}
+}
+
+// --- Iterator benchmarks ---
+
+func BenchmarkIterator_FullScan(b *testing.B) {
+	counts := []struct {
+		name  string
+		count int
+	}{
+		{"100-entries", 100},
+		{"1000-entries", 1000},
+		{"10000-entries", 10000},
+	}
+	for _, vs := range benchValSizes {
+		for _, s := range counts {
+			path := writeBenchSSTable(b, s.count, vs.val)
+			r := openReaderB(b, path)
+
+			b.Run(vs.name+"/"+s.name, func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					it := r.NewIterator()
+					it.SeekToFirst()
+					for it.Valid() {
+						_ = it.Key()
+						_ = it.Value()
+						it.Next()
+					}
+				}
+			})
+
+			r.Close()
+		}
+	}
+}
+
+func BenchmarkIterator_SeekToFirst(b *testing.B) {
+	counts := []struct {
+		name  string
+		count int
+	}{
+		{"100-entries", 100},
+		{"1000-entries", 1000},
+	}
+	for _, s := range counts {
+		path := writeBenchSSTable(b, s.count, benchValSmall)
+		r := openReaderB(b, path)
+
+		b.Run(s.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				it := r.NewIterator()
+				it.SeekToFirst()
+			}
+		})
+
+		r.Close()
+	}
+}
+
+func BenchmarkIterator_Seek(b *testing.B) {
+	counts := []struct {
+		name  string
+		count int
+	}{
+		{"100-entries", 100},
+		{"1000-entries", 1000},
+		{"10000-entries", 10000},
+	}
+	for _, s := range counts {
+		path := writeBenchSSTable(b, s.count, benchValSmall)
+		r := openReaderB(b, path)
+
+		// Pre-compute seek targets spread across the table
+		targets := make([][]byte, 100)
+		for i := range targets {
+			idx := (i * s.count) / len(targets)
+			targets[i] = fmt.Appendf(nil, "key-%08d", idx)
+		}
+
+		b.Run(s.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				it := r.NewIterator()
+				it.Seek(targets[i%len(targets)])
+			}
+		})
+
+		r.Close()
+	}
+}
+
 // --- AllocsPerRun tests ---
 
 func TestBlockBuilder_Add_AllocsPerRun(t *testing.T) {
 	bb := newBlockBuilder()
 	key := putKey("bench-key", 1)
 	val := make([]byte, 64)
-	// Warm up so the backing buffer is already allocated
 	bb.Add(key, val)
 	bb.Reset()
 
@@ -1133,7 +1445,6 @@ func TestBlockBuilder_Add_AllocsPerRun(t *testing.T) {
 		bb.Add(key, val)
 	})
 	// key.Encode() allocates exactly 1 []byte — unavoidable without a scratch buffer.
-	// The blockBuilder itself must not add any extra allocations.
 	if allocs > 1 {
 		t.Errorf("BlockBuilder.Add: expected ≤1 alloc (key.Encode), got %v", allocs)
 	}
@@ -1149,4 +1460,109 @@ func TestBlockBuilder_Reset_NoAllocs(t *testing.T) {
 	if allocs != 0 {
 		t.Errorf("BlockBuilder.Reset: expected 0 allocs, got %v", allocs)
 	}
+}
+
+func TestFooter_Encode_AllocsPerRun(t *testing.T) {
+	f := newFooter(12345, 678, 10, 1000)
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = f.encode()
+	})
+	// encode allocates one []byte for the buffer
+	if allocs > 1 {
+		t.Errorf("Footer.encode: expected ≤1 alloc, got %v", allocs)
+	}
+}
+
+func TestFooter_Decode_AllocsPerRun(t *testing.T) {
+	f := newFooter(12345, 678, 10, 1000)
+	encoded := f.encode()
+	allocs := testing.AllocsPerRun(100, func() {
+		_, _ = decodeFooter(encoded)
+	})
+	if allocs != 0 {
+		t.Errorf("Footer.decode: expected 0 allocs, got %v", allocs)
+	}
+}
+
+func TestDecodeBlockEntries_AllocsPerRun(t *testing.T) {
+	bb := newBlockBuilder()
+	for i := range 10 {
+		bb.Add(putKey(fmt.Sprintf("key-%02d", i), uint64(10-i)), make([]byte, 32))
+	}
+	raw := bb.Finish()
+	payload, err := verifyBlockChecksum(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		_, _ = decodeBlockEntries(payload)
+	})
+	// Each entry decodes a key (1 alloc for InternalKey.UserKey via DecodeInternalKey)
+	// plus the entries slice itself. Exact count depends on implementation, but should
+	// scale linearly with entry count, not quadratically.
+	t.Logf("decodeBlockEntries (10 entries): %.1f allocs", allocs)
+}
+
+func TestReader_Get_AllocsPerRun(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alloc.sst")
+
+	entries := make([]struct {
+		key   keys.InternalKey
+		value []byte
+	}, 0, 100)
+	for i := range 100 {
+		entries = append(entries, struct {
+			key   keys.InternalKey
+			value []byte
+		}{putKey(fmt.Sprintf("key-%04d", i), uint64(100-i)), make([]byte, 32)})
+	}
+	writeSSTable(t, path, entries)
+	r := openReader(t, path)
+	defer r.Close()
+
+	lookupKey := []byte("key-0050")
+	allocs := testing.AllocsPerRun(100, func() {
+		_, _ = r.Get(lookupKey, 100)
+	})
+	// Get allocates: block read buffer, decoded entries, value copy
+	t.Logf("Reader.Get (100 entries, hit): %.1f allocs", allocs)
+}
+
+func TestIterator_Next_AllocsPerRun(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alloc.sst")
+
+	entries := make([]struct {
+		key   keys.InternalKey
+		value []byte
+	}, 0, 100)
+	for i := range 100 {
+		entries = append(entries, struct {
+			key   keys.InternalKey
+			value []byte
+		}{putKey(fmt.Sprintf("key-%04d", i), uint64(100-i)), make([]byte, 32)})
+	}
+	writeSSTable(t, path, entries)
+	r := openReader(t, path)
+	defer r.Close()
+
+	it := r.NewIterator()
+	it.SeekToFirst()
+	// Skip first entry so we're mid-block
+	it.Next()
+
+	allocs := testing.AllocsPerRun(100, func() {
+		// Within-block Next should be zero-alloc
+		if it.Valid() {
+			it.Next()
+		} else {
+			// Reset if exhausted
+			it.SeekToFirst()
+			it.Next()
+		}
+	})
+	// Within-block Next reads from the already-decoded entries slice
+	t.Logf("Iterator.Next (within block): %.1f allocs", allocs)
 }
