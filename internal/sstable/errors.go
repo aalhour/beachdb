@@ -9,6 +9,9 @@ var (
 	// ErrReaderClosed is returned when Close is called on a closed reader.
 	ErrReaderClosed = errors.New("beachdb/sstable: reader is closed")
 
+	// ErrIteratorClosed is returned when Close is called on a closed iterator.
+	ErrIteratorClosed = errors.New("beachdb/sstable: iterator is closed")
+
 	// ErrOutOfOrderKey is returned when Add receives a key that sorts before the previous key.
 	ErrOutOfOrderKey = errors.New("beachdb/sstable: keys must be added in sorted order")
 

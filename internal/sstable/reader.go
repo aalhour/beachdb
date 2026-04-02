@@ -10,16 +10,7 @@ import (
 	"sync"
 
 	"github.com/aalhour/beachdb/internal/keys"
-	"github.com/aalhour/beachdb/internal/util/checksum"
-	"github.com/aalhour/beachdb/internal/util/coding"
 )
-
-// blockEntry defines a convenience struct for holding
-// a decoded entry from a block read from disk
-type blockEntry struct {
-	key   keys.InternalKey
-	value []byte
-}
 
 // Reader defines the SSTable reader struct.
 type Reader struct {
@@ -176,6 +167,27 @@ func (r *Reader) readBlock(offset uint64, size uint32) ([]byte, error) {
 	return blockPayload, nil
 }
 
+// loadBlockEntries loads the entries from a block at a given
+// index returns its entries decoded
+func (r *Reader) loadBlockEntries(blockIdx int) ([]blockEntry, error) {
+	if blockIdx < 0 || blockIdx >= len(r.index) {
+		return nil, fmt.Errorf("beachdb/sstable: invalid blockIdx %d", blockIdx)
+	}
+
+	index := r.index[blockIdx]
+	data, err := r.readBlock(index.offset, index.size)
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := decodeBlockEntries(data)
+	if err != nil {
+		return nil, err
+	}
+
+	return entries, nil
+}
+
 // readFooter takes a file and returns a footer struct or error
 // this function assumes that the file pointer was validated
 func readFooter(file *os.File) (footer, error) {
@@ -223,114 +235,7 @@ func readIndexEntries(file *os.File, decodedFooter footer) ([]indexEntry, error)
 		return nil, ErrCorruptIndex
 	}
 
-	// Validate the CRC32 checksum
-	n := len(indexPayload)
-	expectedCRC32 := coding.Uint32(indexPayload[n-4:])
-	calculatedCRC32 := checksum.CRC32C(indexPayload[:n-4])
-	if calculatedCRC32 != expectedCRC32 {
-		return nil, ErrIndexChecksumMismatch
-	}
-
-	var indexEntries []indexEntry
-	br := coding.NewByteReader(indexPayload[:n-4])
-
-	for br.Remaining() > 0 {
-		keyLen, err := br.ReadUint32()
-		if err != nil {
-			return nil, ErrCorruptIndex
-		}
-
-		keyBytes, err := br.ReadBytes(int(keyLen))
-		if err != nil {
-			return nil, ErrCorruptIndex
-		}
-
-		key, err := keys.DecodeInternalKey(keyBytes)
-		if err != nil {
-			return nil, ErrCorruptIndex
-		}
-
-		offset, err := br.ReadUint64()
-		if err != nil {
-			return nil, ErrCorruptIndex
-		}
-
-		size, err := br.ReadUint32()
-		if err != nil {
-			return nil, ErrCorruptIndex
-		}
-
-		indexEntries = append(indexEntries, indexEntry{
-			lastKey: key,
-			offset:  offset,
-			size:    size,
-		})
-	}
-
-	return indexEntries, nil
-}
-
-// verifyBlockChecksum takes a block's raw bytes, verifies its
-// checksum and returns only the block's data bytes (minus the checksum)
-func verifyBlockChecksum(raw []byte) ([]byte, error) {
-	n := len(raw)
-
-	// Validate length
-	if n < int(checksumSize) {
-		return nil, ErrCorruptBlock
-	}
-
-	// Validate checksum
-	payload := raw[:n-int(checksumSize)]
-	storedChecksum := coding.Uint32(raw[n-int(checksumSize):])
-	calculatedChecksum := checksum.CRC32C(payload)
-	if storedChecksum != calculatedChecksum {
-		return nil, ErrBlockChecksumMismatch
-	}
-
-	return payload, nil
-}
-
-// decodeBlockEntries takes a block byte payload and decodes each
-// key-value entry in it, returning a list of block entries or error
-func decodeBlockEntries(payload []byte) ([]blockEntry, error) {
-	br := coding.NewByteReader(payload)
-	var entries []blockEntry
-
-	for br.Remaining() > 0 {
-		// Decode the bytes a segment at a time
-		keyLen, err := br.ReadUint32()
-		if err != nil {
-			return nil, ErrCorruptBlock
-		}
-
-		keyBytes, err := br.ReadBytes(int(keyLen))
-		if err != nil {
-			return nil, ErrCorruptBlock
-		}
-
-		key, err := keys.DecodeInternalKey(keyBytes)
-		if err != nil {
-			return nil, ErrCorruptBlock
-		}
-
-		valueLen, err := br.ReadUint32()
-		if err != nil {
-			return nil, ErrCorruptBlock
-		}
-
-		valueBytes, err := br.ReadBytes(int(valueLen))
-		if err != nil {
-			return nil, ErrCorruptBlock
-		}
-
-		entries = append(entries, blockEntry{
-			key:   key,
-			value: valueBytes,
-		})
-	}
-
-	return entries, nil
+	return decodeIndexBlock(indexPayload)
 }
 
 // scanBlock scans decoded entries for the newest visible version of userKey.

@@ -1,14 +1,19 @@
 package sstable
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"sync"
 	"testing"
 
 	"github.com/aalhour/beachdb/internal/keys"
+	"github.com/aalhour/beachdb/internal/testutil"
 	"github.com/aalhour/beachdb/internal/util/checksum"
 	"github.com/aalhour/beachdb/internal/util/coding"
 )
@@ -54,7 +59,7 @@ func openReader(t *testing.T, path string) *Reader {
 	return r
 }
 
-// --- Task 2.1: OpenReader tests ---
+// --- OpenReader tests ---
 
 func TestReader_OpenEmptyTable(t *testing.T) {
 	dir := t.TempDir()
@@ -270,7 +275,7 @@ func TestReader_CloseNilReader(t *testing.T) {
 	}
 }
 
-// --- Task 2.2: Block reading and entry decoding tests ---
+// --- Block reading and entry decoding tests ---
 
 func TestReader_BlockChecksumMismatch(t *testing.T) {
 	dir := t.TempDir()
@@ -307,9 +312,12 @@ func TestReader_BlockChecksumMismatch(t *testing.T) {
 	}
 }
 
-func TestReader_DecodeEntries(t *testing.T) {
+// --- Point lookup tests ---
+
+// Spec: "TestReader_GetSingleVersion"
+func TestReader_GetSingleVersion(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "decode.sst")
+	path := filepath.Join(dir, "single.sst")
 
 	entries := []struct {
 		key   keys.InternalKey
@@ -324,41 +332,14 @@ func TestReader_DecodeEntries(t *testing.T) {
 	r := openReader(t, path)
 	defer r.Close()
 
-	// Verify each entry round-trips correctly via Get
 	for _, e := range entries {
 		val, err := r.Get(e.key.UserKey, e.key.Seqno)
 		if err != nil {
-			t.Fatalf("Get(%s) failed: %v", e.key.UserKey, err)
+			t.Fatalf("Get(%s): %v", e.key.UserKey, err)
 		}
 		if string(val) != string(e.value) {
 			t.Fatalf("Get(%s) = %q, want %q", e.key.UserKey, val, e.value)
 		}
-	}
-}
-
-// --- Task 2.3: Point lookup tests ---
-
-func TestReader_GetExactMatch(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "exact.sst")
-
-	entries := []struct {
-		key   keys.InternalKey
-		value []byte
-	}{
-		{putKey("hello", 1), []byte("world")},
-	}
-	writeSSTable(t, path, entries)
-
-	r := openReader(t, path)
-	defer r.Close()
-
-	val, err := r.Get([]byte("hello"), 1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if string(val) != "world" {
-		t.Fatalf("got %q, want %q", val, "world")
 	}
 }
 
@@ -983,4 +964,106 @@ func TestReader_ConcurrentGetAndClose(t *testing.T) {
 	_ = r.Close()
 
 	wg.Wait()
+}
+
+// --- Randomized round-trip test ---
+
+// Spec: "TestRoundTrip_Randomized — write N random entries, sort them by
+// internal key, write to an SSTable, read back via iterator, verify all
+// entries match."
+func TestRoundTrip_Randomized(t *testing.T) {
+	t.Parallel()
+
+	const numEntries = 500
+	rng := rand.New(rand.NewPCG(42, 99)) //nolint:gosec // deterministic seed for reproducibility
+
+	// Generate random entries
+	type kv struct {
+		key   keys.InternalKey
+		value []byte
+	}
+	entries := make([]kv, 0, numEntries)
+	seen := make(map[string]bool)
+
+	for len(entries) < numEntries {
+		userKey := testutil.RandKey(rng, 32)
+		seqno := rng.Uint64N(10000) + 1
+
+		// Deduplicate (userKey, seqno) pairs to avoid writer rejection
+		dedup := string(userKey) + "/" + strconv.FormatUint(seqno, 10)
+		if seen[dedup] {
+			continue
+		}
+		seen[dedup] = true
+
+		kind := keys.InternalKeyKindPut
+		if rng.IntN(10) == 0 {
+			kind = keys.InternalKeyKindDelete
+		}
+
+		var val []byte
+		if kind == keys.InternalKeyKindPut {
+			val = testutil.RandValue(rng, 128)
+		}
+
+		entries = append(entries, kv{
+			key:   keys.InternalKey{UserKey: userKey, Seqno: seqno, Kind: kind},
+			value: val,
+		})
+	}
+
+	// Sort by internal key order (the writer requires sorted input)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].key.Compare(entries[j].key) < 0
+	})
+
+	// Write
+	dir := t.TempDir()
+	path := filepath.Join(dir, "random.sst")
+
+	writerEntries := make([]struct {
+		key   keys.InternalKey
+		value []byte
+	}, len(entries))
+	for i, e := range entries {
+		writerEntries[i] = struct {
+			key   keys.InternalKey
+			value []byte
+		}{e.key, e.value}
+	}
+	writeSSTable(t, path, writerEntries)
+
+	// Read back via iterator and verify
+	r := openReader(t, path)
+	defer r.Close()
+
+	it := r.NewIterator()
+	idx := 0
+	for it.SeekToFirst(); it.Valid(); it.Next() {
+		if idx >= len(entries) {
+			t.Fatalf("iterator returned more entries than written (%d)", len(entries))
+		}
+
+		gotKey := it.Key()
+		wantKey := entries[idx].key
+		if gotKey.Compare(wantKey) != 0 {
+			t.Fatalf("entry %d: key mismatch: got {%q, %d, %d}, want {%q, %d, %d}",
+				idx, gotKey.UserKey, gotKey.Seqno, gotKey.Kind,
+				wantKey.UserKey, wantKey.Seqno, wantKey.Kind)
+		}
+
+		gotVal := it.Value()
+		wantVal := entries[idx].value
+		if !bytes.Equal(gotVal, wantVal) {
+			t.Fatalf("entry %d: value mismatch: got %x, want %x", idx, gotVal, wantVal)
+		}
+
+		idx++
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("iterator error: %v", err)
+	}
+	if idx != len(entries) {
+		t.Fatalf("iterator returned %d entries, want %d", idx, len(entries))
+	}
 }

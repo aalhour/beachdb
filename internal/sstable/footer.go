@@ -1,5 +1,13 @@
 package sstable
 
+// footer.go — Footer encoding and decoding.
+//
+// The footer is a fixed 40-byte record at EOF that bootstraps the reader:
+//
+//	[magic:8][version:4][index_offset:8][index_size:4][data_block_count:4][entry_count:8][checksum:4]
+//
+// See docs/formats/sstable.md for the full format specification.
+
 import (
 	"github.com/aalhour/beachdb/internal/util/checksum"
 	"github.com/aalhour/beachdb/internal/util/coding"
