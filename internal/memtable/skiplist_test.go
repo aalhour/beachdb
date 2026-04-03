@@ -741,8 +741,8 @@ func TestGet_Tombstones(t *testing.T) {
 
 		// The tombstone comes first in sort order (same seqno, inserted later)
 		val, ok := sl.Get([]byte("k"), 5)
-		if ok || val != nil {
-			t.Errorf("Get(k, 5) = (%q, %v), want (nil, false) due to tombstone", val, ok)
+		if !ok || val != nil {
+			t.Errorf("Get(k, 5) = (%q, %v), want (nil, true) due to tombstone", val, ok)
 		}
 	})
 
@@ -751,16 +751,16 @@ func TestGet_Tombstones(t *testing.T) {
 		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 3, Kind: keys.InternalKeyKindPut}, []byte("old"))
 		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 5, Kind: keys.InternalKeyKindDelete}, nil) // delete
 
-		// At seqno 5: tombstone is visible -> not found
+		// At seqno 5: tombstone is visible -> found as deleted (nil, true)
 		val, ok := sl.Get([]byte("k"), 5)
-		if ok || val != nil {
-			t.Errorf("Get(k, 5) = (%q, %v), want (nil, false)", val, ok)
+		if !ok || val != nil {
+			t.Errorf("Get(k, 5) = (%q, %v), want (nil, true)", val, ok)
 		}
 
-		// At seqno 6: tombstone is still the newest visible -> not found
+		// At seqno 6: tombstone is still the newest visible -> found as deleted
 		val, ok = sl.Get([]byte("k"), 6)
-		if ok || val != nil {
-			t.Errorf("Get(k, 6) = (%q, %v), want (nil, false)", val, ok)
+		if !ok || val != nil {
+			t.Errorf("Get(k, 6) = (%q, %v), want (nil, true)", val, ok)
 		}
 
 		// At seqno 4: tombstone not visible, but put@3 is -> found
@@ -782,10 +782,10 @@ func TestGet_Tombstones(t *testing.T) {
 			t.Errorf("Get(k, 5) = (%q, %v), want (resurrected, true)", val, ok)
 		}
 
-		// At seqno 4: tombstone@3 is newest visible -> not found
+		// At seqno 4: tombstone@3 is newest visible -> found as deleted
 		val, ok = sl.Get([]byte("k"), 4)
-		if ok || val != nil {
-			t.Errorf("Get(k, 4) = (%q, %v), want (nil, false)", val, ok)
+		if !ok || val != nil {
+			t.Errorf("Get(k, 4) = (%q, %v), want (nil, true)", val, ok)
 		}
 
 		// At seqno 2: put@1 is newest visible -> found

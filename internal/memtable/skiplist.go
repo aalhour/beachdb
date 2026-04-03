@@ -160,7 +160,7 @@ func (sl *SkipList) Put(key keys.InternalKey, value []byte) {
 //
 // Semantics: finds the newest version of userKey with seqno <= requested seqno.
 // If that version is a tombstone (KindDelete), returns (nil, false).
-func (sl *SkipList) Get(userKey []byte, seqno uint64) ([]byte, bool) {
+func (sl *SkipList) Get(userKey []byte, seqno uint64) (value []byte, found bool) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
 
@@ -191,7 +191,7 @@ func (sl *SkipList) Get(userKey []byte, seqno uint64) ([]byte, bool) {
 
 	// Check if it's a tombstone
 	if node.key.Kind == keys.InternalKeyKindDelete {
-		return nil, false // Key was deleted
+		return nil, true // Key was found but it was deleted
 	}
 
 	// Found it! Return a *copy* of the value
