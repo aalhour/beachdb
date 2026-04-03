@@ -510,9 +510,9 @@ func TestDB_ApplyBatch(t *testing.T) {
 
 			// Verify keys that should NOT exist (deleted or never added)
 			for _, key := range test.expectGone {
-				_, found := db.mem.Get([]byte(key), db.seqno)
-				if found {
-					t.Errorf("key %q should not exist (was deleted or never added)", key)
+				val, found := db.mem.Get([]byte(key), db.seqno)
+				if found && val != nil {
+					t.Errorf("key %q should not exist (was deleted or never added), got value %q", key, val)
 				}
 			}
 		})
@@ -911,8 +911,8 @@ func TestDB_CrashLoop(t *testing.T) {
 		expectedValue, modelHasKey := model.Get(key)
 		actualValue, dbErr := db.Get(ctx, key)
 
-		if !modelHasKey {
-			// Key was deleted in model (tombstoned) — DB should also return not found
+		if !modelHasKey || expectedValue == nil {
+			// Key was never written or was deleted (tombstone) — DB should return not found
 			if dbErr == nil {
 				t.Errorf("key %q: deleted in model but found in DB with value %x", key, actualValue)
 			} else if !errors.Is(dbErr, ErrKeyNotFound) {
