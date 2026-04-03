@@ -53,4 +53,7 @@ var (
 
 	// ErrKeyNotFound is returned when Get finds no entry for the key in the table.
 	ErrKeyNotFound = errors.New("beachdb/sstable: key not found")
+
+	// ErrKeyDeleted is returned when Get finds a tombstone for the key.
+	ErrKeyDeleted = errors.New("beachdb/sstable: key deleted")
 )

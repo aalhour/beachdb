@@ -239,7 +239,7 @@ func readIndexEntries(file *os.File, decodedFooter footer) ([]indexEntry, error)
 }
 
 // scanBlock scans decoded entries for the newest visible version of userKey.
-// Returns (value, true, nil) on a visible put, (nil, true, ErrKeyNotFound)
+// Returns (value, true, nil) on a visible put, (nil, true, ErrKeyDeleted)
 // on a visible tombstone, (nil, true, nil) if the key is present but no
 // version is visible yet, and (nil, false, nil) if the key is absent.
 func scanBlock(entries []blockEntry, userKey []byte, seqno uint64) ([]byte, bool, error) {
@@ -251,7 +251,7 @@ func scanBlock(entries []blockEntry, userKey []byte, seqno uint64) ([]byte, bool
 		found = true
 		if entry.key.Seqno <= seqno {
 			if entry.key.Kind == keys.InternalKeyKindDelete {
-				return nil, true, ErrKeyNotFound
+				return nil, true, ErrKeyDeleted
 			}
 			return slices.Clone(entry.value), true, nil
 		}

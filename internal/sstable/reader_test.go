@@ -359,8 +359,8 @@ func TestReader_GetTombstone(t *testing.T) {
 	defer r.Close()
 
 	_, err := r.Get([]byte("gone"), 1)
-	if !errors.Is(err, ErrKeyNotFound) {
-		t.Fatalf("expected ErrKeyNotFound for tombstone, got %v", err)
+	if !errors.Is(err, ErrKeyDeleted) {
+		t.Fatalf("expected ErrKeyDeleted for tombstone, got %v", err)
 	}
 }
 
@@ -571,14 +571,14 @@ func TestReader_GetTombstoneHidesOlderPut(t *testing.T) {
 
 	// At seqno=5, the delete is visible
 	_, err := r.Get([]byte("key"), 5)
-	if !errors.Is(err, ErrKeyNotFound) {
-		t.Fatalf("expected ErrKeyNotFound (tombstone), got %v", err)
+	if !errors.Is(err, ErrKeyDeleted) {
+		t.Fatalf("expected ErrKeyDeleted (tombstone), got %v", err)
 	}
 
 	// At seqno=10, the delete is still the newest visible version
 	_, err = r.Get([]byte("key"), 10)
-	if !errors.Is(err, ErrKeyNotFound) {
-		t.Fatalf("expected ErrKeyNotFound (tombstone at higher seqno), got %v", err)
+	if !errors.Is(err, ErrKeyDeleted) {
+		t.Fatalf("expected ErrKeyDeleted (tombstone at higher seqno), got %v", err)
 	}
 }
 
