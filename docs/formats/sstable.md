@@ -197,7 +197,7 @@ Footer Layout (v1)
 
 Offset  Size  Field            Description
 ------  ----  -----            -----------
-0       8     magic            File magic: ASCII "BCHSST01"
+0       8     magic            File magic: ASCII "BEACHSST"
 8       4     version          SSTable format version (uint32, v1 = 1)
 12      8     index_offset     Absolute file offset of the index block
 20      4     index_size       Full on-disk size of the index block, including checksum trailer
