@@ -23,4 +23,7 @@ var (
 
 	// ErrCreatingSSTFile indicates that an error occurred while creating a new sstable file.
 	ErrCreatingSSTFile = errors.New("beachdb: couldn't create sstable file")
+
+	// ErrInvalidMemtableFlushSize indicates that the size specified for flushing memtable is invalid.
+	ErrInvalidMemtableFlushSize = errors.New("beachdb: invalid memtable size flush trigger")
 )
