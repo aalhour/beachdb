@@ -18,6 +18,7 @@ linters:
     - usestdlibvars   # Detect cases where stdlib vars should be used
     - perfsprint      # Use strconv instead of fmt.Sprintf where possible
     - staticcheck     # Static code analysis linter
+    - lll             # Line length limit (readability in storage code)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Code complexity
@@ -71,6 +72,11 @@ linters:
     - gosec           # Security-oriented checks
 
   settings:
+    # Line length limit for readability
+    lll:
+      line-length: 120
+      tab-width: 1
+
     # Cyclomatic complexity threshold
     gocyclo:
       min-complexity: 15
@@ -127,7 +133,7 @@ linters:
       excludes:
         - G104  # Audit errors not checked (covered by errcheck)
 
-    # Wrapcheck: don't require wrapping errors from stdlib
+    # Wrapcheck: require wrapping errors from external packages (even internal packages)
     wrapcheck:
       ignore-sigs:
         - .Errorf(
@@ -140,7 +146,6 @@ linters:
         - .WithStack(
       ignore-package-globs:
         - encoding/*
-        - github.com/aalhour/beachdb/*
 
     # Misspell settings
     misspell:

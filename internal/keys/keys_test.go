@@ -5,6 +5,45 @@ import (
 	"testing"
 )
 
+// --- Benchmarks ---
+
+func BenchmarkInternalKey_Encode(b *testing.B) {
+	key := InternalKey{
+		UserKey: []byte("some-user-key"),
+		Seqno:   42,
+		Kind:    InternalKeyKindPut,
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = key.Encode()
+	}
+}
+
+func BenchmarkDecodeInternalKey(b *testing.B) {
+	key := InternalKey{
+		UserKey: []byte("some-user-key"),
+		Seqno:   42,
+		Kind:    InternalKeyKindPut,
+	}
+	encoded := key.Encode()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = DecodeInternalKey(encoded)
+	}
+}
+
+func BenchmarkInternalKey_Compare(b *testing.B) {
+	k1 := InternalKey{UserKey: []byte("aaaa"), Seqno: 10, Kind: InternalKeyKindPut}
+	k2 := InternalKey{UserKey: []byte("bbbb"), Seqno: 5, Kind: InternalKeyKindPut}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = k1.Compare(k2)
+	}
+}
+
 func TestCompare(t *testing.T) {
 	tests := []struct {
 		name   string

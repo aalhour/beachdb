@@ -297,6 +297,65 @@ func Test_ByteReader_ReadUint32(t *testing.T) {
 	}
 }
 
+func Test_ByteReader_ReadUint64(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   []byte
+		expect  uint64
+		wantErr bool
+	}{
+		{
+			name:    "simple uint64",
+			input:   []byte{0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x56, 0x78},
+			expect:  0x1234567812345678,
+			wantErr: false,
+		},
+		{
+			name:    "all zero",
+			input:   []byte{0, 0, 0, 0, 0, 0, 0, 0},
+			expect:  0,
+			wantErr: false,
+		},
+		{
+			name:    "max uint64",
+			input:   []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
+			expect:  0xFFFFFFFFFFFFFFFF,
+			wantErr: false,
+		},
+		{
+			name:    "less than 8 bytes",
+			input:   []byte{1, 2, 3, 4, 5},
+			expect:  0,
+			wantErr: true,
+		},
+		{
+			name:    "empty input",
+			input:   []byte{},
+			expect:  0,
+			wantErr: true,
+		},
+		{
+			name:    "extra data after uint64",
+			input:   []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xFF},
+			expect:  0x0102030405060708,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewByteReader(tt.input)
+			got, err := r.ReadUint64()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ReadUint64: unexpected error state: got err=%v, wantErr=%v", err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.expect {
+				t.Errorf("ReadUint64: got %08x, want %08x", got, tt.expect)
+			}
+		})
+	}
+}
+
 func Test_ByteReader_Remaining(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -348,5 +407,70 @@ func Test_ByteReader_Remaining(t *testing.T) {
 				t.Errorf("Remaining: got %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// --- Benchmarks ---
+
+func BenchmarkPutUint32(b *testing.B) {
+	buf := make([]byte, 4)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		PutUint32(buf, 0xDEADBEEF)
+	}
+}
+
+func BenchmarkUint32(b *testing.B) {
+	buf := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = Uint32(buf)
+	}
+}
+
+func BenchmarkPutUint64(b *testing.B) {
+	buf := make([]byte, 8)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		PutUint64(buf, 0xDEADBEEFCAFEBABE)
+	}
+}
+
+func BenchmarkUint64(b *testing.B) {
+	buf := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = Uint64(buf)
+	}
+}
+
+func BenchmarkByteReader_ReadUint32(b *testing.B) {
+	// Read all uint32 values from a 4KB block sequentially
+	const blockSize = 4096
+	data := make([]byte, blockSize)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r := NewByteReader(data)
+		for r.Remaining() >= 4 {
+			_, _ = r.ReadUint32()
+		}
+	}
+}
+
+func BenchmarkByteReader_ReadUint64(b *testing.B) {
+	const blockSize = 4096
+	data := make([]byte, blockSize)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r := NewByteReader(data)
+		for r.Remaining() >= 8 {
+			_, _ = r.ReadUint64()
+		}
 	}
 }

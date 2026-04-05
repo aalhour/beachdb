@@ -31,7 +31,7 @@ BeachDB is my attempt to re-learn the fundamentals by building them from scratch
 - [x] **Crash-loop harness**: kill mid-write, reopen, validate invariants
 - [x] **Memtable v1**: sorted structure + tombstones, see: [memtable blog post](https://aalhour.com/posts/beachdb-memtable-v1/)
 - [x] **Reference-model randomized tests** (model vs implementation)
-- [ ] **SSTables v1**: immutable sorted files + `sst_dump`
+- [x] **SSTables v1**: immutable sorted files + `sst_dump`, see: [sstables blog post](https://aalhour.com/posts/beachdb-sstables-v1/)
 - [ ] **Merge iterators** (memtable + SSTs) + **snapshot reads** (seqno-based)
 - [ ] **Manifest/versioning** + `manifest_dump` (startup reconstruction)
 - [ ] **Read path acceleration**: block index + bloom filters + benchmark evidence

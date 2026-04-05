@@ -592,3 +592,60 @@ func TestIterator_SnapshotConsistency(t *testing.T) {
 		}
 	}
 }
+
+// --- Benchmarks ---
+
+func BenchmarkIterator_FullScan(b *testing.B) {
+	counts := []int{100, 1000, 10000}
+	for _, n := range counts {
+		sl := NewSkipList()
+		for i := range n {
+			putEntry(sl, fmt.Sprintf("key-%08d", i), 1, "val")
+		}
+		b.Run(fmt.Sprintf("%d-entries", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				it := sl.NewIterator()
+				for it.SeekToFirst(); it.Valid(); it.Next() {
+					_ = it.Key()
+				}
+				it.Close()
+			}
+		})
+	}
+}
+
+func BenchmarkIterator_Seek(b *testing.B) {
+	const n = 1000
+	sl := NewSkipList()
+	for i := range n {
+		putEntry(sl, fmt.Sprintf("key-%08d", i), 1, "val")
+	}
+	target := []byte("key-00000500") // middle key
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		it := sl.NewIterator()
+		it.Seek(target)
+		it.Close()
+	}
+}
+
+func BenchmarkIterator_Next(b *testing.B) {
+	const n = 1000
+	sl := NewSkipList()
+	for i := range n {
+		putEntry(sl, fmt.Sprintf("key-%08d", i), 1, "val")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		it := sl.NewIterator()
+		it.SeekToFirst()
+		for it.Valid() {
+			it.Next()
+		}
+		it.Close()
+	}
+}

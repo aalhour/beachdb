@@ -20,4 +20,10 @@ var (
 
 	// ErrKeyNotFound indicates that a key doesn't exist in the database.
 	ErrKeyNotFound = errors.New("beachdb: key not found")
+
+	// ErrCreatingSSTFile indicates that an error occurred while creating a new sstable file.
+	ErrCreatingSSTFile = errors.New("beachdb: couldn't create sstable file")
+
+	// ErrInvalidMemtableFlushSize indicates that the size specified for flushing memtable is invalid.
+	ErrInvalidMemtableFlushSize = errors.New("beachdb: invalid memtable size flush trigger")
 )

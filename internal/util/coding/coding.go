@@ -43,6 +43,16 @@ func (r *ByteReader) ReadUint32() (uint32, error) {
 	return v, nil
 }
 
+// ReadUint64 reads a big-endian uint64.
+func (r *ByteReader) ReadUint64() (uint64, error) {
+	if r.offset+8 > len(r.data) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	v := Uint64(r.data[r.offset:])
+	r.offset += 8
+	return v, nil
+}
+
 // ReadBytes reads exactly n bytes.
 // Returns a slice view of the underlying data. Callers should copy the result
 // if they need to retain the data beyond the lifetime of the ByteReader.

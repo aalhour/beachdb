@@ -55,7 +55,8 @@ func (m *Model) DeleteAt(key []byte, seqno uint64) {
 
 // GetAt returns the value for key at the given seqno.
 // Returns the newest version with seqno <= target.
-// Returns (nil, false) if not found or if newest version is a tombstone.
+// Returns (nil, true) if the newest visible version is a tombstone.
+// Returns (nil, false) if no version exists for the key.
 func (m *Model) GetAt(key []byte, seqno uint64) ([]byte, bool) {
 	var best *entry
 
@@ -77,7 +78,7 @@ func (m *Model) GetAt(key []byte, seqno uint64) ([]byte, bool) {
 		return nil, false
 	}
 	if best.isDelete {
-		return nil, false // Tombstone
+		return nil, true // Tombstone: key found, but deleted
 	}
 
 	// Return a copy

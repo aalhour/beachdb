@@ -1,6 +1,7 @@
 package memtable
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"testing"
@@ -740,8 +741,8 @@ func TestGet_Tombstones(t *testing.T) {
 
 		// The tombstone comes first in sort order (same seqno, inserted later)
 		val, ok := sl.Get([]byte("k"), 5)
-		if ok || val != nil {
-			t.Errorf("Get(k, 5) = (%q, %v), want (nil, false) due to tombstone", val, ok)
+		if !ok || val != nil {
+			t.Errorf("Get(k, 5) = (%q, %v), want (nil, true) due to tombstone", val, ok)
 		}
 	})
 
@@ -750,16 +751,16 @@ func TestGet_Tombstones(t *testing.T) {
 		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 3, Kind: keys.InternalKeyKindPut}, []byte("old"))
 		sl.Put(keys.InternalKey{UserKey: []byte("k"), Seqno: 5, Kind: keys.InternalKeyKindDelete}, nil) // delete
 
-		// At seqno 5: tombstone is visible -> not found
+		// At seqno 5: tombstone is visible -> found as deleted (nil, true)
 		val, ok := sl.Get([]byte("k"), 5)
-		if ok || val != nil {
-			t.Errorf("Get(k, 5) = (%q, %v), want (nil, false)", val, ok)
+		if !ok || val != nil {
+			t.Errorf("Get(k, 5) = (%q, %v), want (nil, true)", val, ok)
 		}
 
-		// At seqno 6: tombstone is still the newest visible -> not found
+		// At seqno 6: tombstone is still the newest visible -> found as deleted
 		val, ok = sl.Get([]byte("k"), 6)
-		if ok || val != nil {
-			t.Errorf("Get(k, 6) = (%q, %v), want (nil, false)", val, ok)
+		if !ok || val != nil {
+			t.Errorf("Get(k, 6) = (%q, %v), want (nil, true)", val, ok)
 		}
 
 		// At seqno 4: tombstone not visible, but put@3 is -> found
@@ -781,10 +782,10 @@ func TestGet_Tombstones(t *testing.T) {
 			t.Errorf("Get(k, 5) = (%q, %v), want (resurrected, true)", val, ok)
 		}
 
-		// At seqno 4: tombstone@3 is newest visible -> not found
+		// At seqno 4: tombstone@3 is newest visible -> found as deleted
 		val, ok = sl.Get([]byte("k"), 4)
-		if ok || val != nil {
-			t.Errorf("Get(k, 4) = (%q, %v), want (nil, false)", val, ok)
+		if !ok || val != nil {
+			t.Errorf("Get(k, 4) = (%q, %v), want (nil, true)", val, ok)
 		}
 
 		// At seqno 2: put@1 is newest visible -> found
@@ -1051,5 +1052,70 @@ func TestFindPredecessors_OnEmptyAfterInit(t *testing.T) {
 		if p != sl.head {
 			t.Errorf("preds[%d] = %v, want head", i, p)
 		}
+	}
+}
+
+// --- Benchmarks ---
+
+func BenchmarkSkipList_Put(b *testing.B) {
+	counts := []int{100, 1000, 10000}
+	for _, n := range counts {
+		// Pre-generate keys outside the timed loop
+		ks := make([]keys.InternalKey, n)
+		vals := make([][]byte, n)
+		for i := range n {
+			ks[i] = keys.InternalKey{
+				UserKey: fmt.Appendf(nil, "key-%08d", i),
+				Seqno:   uint64(i + 1),
+				Kind:    keys.InternalKeyKindPut,
+			}
+			vals[i] = fmt.Appendf(nil, "val-%08d", i)
+		}
+		b.Run(fmt.Sprintf("%d-entries", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				sl := NewSkipList()
+				for j := range n {
+					sl.Put(ks[j], vals[j])
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkSkipList_Get_Hit(b *testing.B) {
+	const n = 1000
+	sl := NewSkipList()
+	for i := range n {
+		sl.Put(keys.InternalKey{
+			UserKey: fmt.Appendf(nil, "key-%08d", i),
+			Seqno:   uint64(i + 1),
+			Kind:    keys.InternalKeyKindPut,
+		}, []byte("value"))
+	}
+	target := []byte("key-00000500")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = sl.Get(target, uint64(n))
+	}
+}
+
+func BenchmarkSkipList_Get_Miss(b *testing.B) {
+	const n = 1000
+	sl := NewSkipList()
+	for i := range n {
+		sl.Put(keys.InternalKey{
+			UserKey: fmt.Appendf(nil, "key-%08d", i),
+			Seqno:   uint64(i + 1),
+			Kind:    keys.InternalKeyKindPut,
+		}, []byte("value"))
+	}
+	target := []byte("zzz-missing-key")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = sl.Get(target, uint64(n))
 	}
 }

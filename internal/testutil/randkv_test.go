@@ -225,3 +225,48 @@ func TestFillRandomBytes(t *testing.T) {
 		}
 	})
 }
+
+// --- Benchmarks ---
+
+func BenchmarkRandKey(b *testing.B) {
+	//nolint:gosec // G404: Benchmark code doesn't need crypto/rand
+	rng := rand.New(rand.NewPCG(42, 0))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = RandKey(rng, 32)
+	}
+}
+
+func BenchmarkRandValue(b *testing.B) {
+	//nolint:gosec // G404: Benchmark code doesn't need crypto/rand
+	rng := rand.New(rand.NewPCG(42, 0))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = RandValue(rng, 128)
+	}
+}
+
+func BenchmarkFillRandomBytes(b *testing.B) {
+	sizes := []struct {
+		name string
+		size int
+	}{
+		{"8B", 8},
+		{"64B", 64},
+		{"1KB", 1024},
+	}
+	//nolint:gosec // G404: Benchmark code doesn't need crypto/rand
+	rng := rand.New(rand.NewPCG(42, 0))
+	for _, s := range sizes {
+		buf := make([]byte, s.size)
+		b.Run(s.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				fillRandomBytes(rng, buf)
+			}
+		})
+	}
+}

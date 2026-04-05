@@ -134,10 +134,10 @@ func TestModel_Delete(t *testing.T) {
 	// Delete adds a tombstone
 	m.Delete(key)
 
-	// Key should no longer be visible via Get
-	_, ok = m.Get(key)
-	if ok {
-		t.Error("key should not be visible after delete (tombstone)")
+	// Key should be found as a tombstone (nil value, found=true)
+	val, ok := m.Get(key)
+	if !ok || val != nil {
+		t.Errorf("expected (nil, true) for tombstone, got (%q, %v)", val, ok)
 	}
 
 	// But Len() counts all entries (put + tombstone)
@@ -157,10 +157,10 @@ func TestModel_Delete_NonExistent(t *testing.T) {
 		t.Errorf("expected 1 entry (tombstone), got %d", m.Len())
 	}
 
-	// Key should not be found
-	_, ok := m.Get([]byte("nonexistent"))
-	if ok {
-		t.Error("deleted non-existent key should not be found")
+	// Key should be found as a tombstone
+	val, ok := m.Get([]byte("nonexistent"))
+	if !ok || val != nil {
+		t.Errorf("expected (nil, true) for tombstone, got (%q, %v)", val, ok)
 	}
 }
 
@@ -339,9 +339,9 @@ func TestModel_MultipleOperations(t *testing.T) {
 		t.Errorf("expected 'updated', got %q", got)
 	}
 
-	_, ok := m.Get([]byte("b"))
-	if ok {
-		t.Error("key 'b' should not be visible (tombstoned)")
+	val, ok := m.Get([]byte("b"))
+	if !ok || val != nil {
+		t.Errorf("key 'b': expected (nil, true) for tombstone, got (%q, %v)", val, ok)
 	}
 
 	got, _ = m.Get([]byte("c"))
@@ -444,10 +444,13 @@ func TestModel_DeleteAt_GetAt(t *testing.T) {
 		t.Errorf("GetAt(1): expected 'v1', got %q", got)
 	}
 
-	// GetAt seqno 2 should return nothing (tombstone)
-	_, ok = m.GetAt(key, 2)
-	if ok {
-		t.Error("GetAt(2) should not find anything (tombstone)")
+	// GetAt seqno 2 should return (nil, true) — tombstone is a definitive answer
+	got, ok = m.GetAt(key, 2)
+	if !ok {
+		t.Error("GetAt(2) should return found=true for tombstone")
+	}
+	if got != nil {
+		t.Errorf("GetAt(2) should return nil value for tombstone, got %q", got)
 	}
 
 	// GetAt seqno 3 should return v3 (resurrected)
@@ -484,8 +487,8 @@ func TestModel_GetAt_SeqnoVisibility(t *testing.T) {
 		{"b", 1, "", false},
 		{"b", 2, "b2", true},
 		{"b", 3, "b2", true},
-		{"b", 4, "", false}, // tombstone
-		{"b", 100, "", false},
+		{"b", 4, "", true}, // tombstone: found=true, value=nil
+		{"b", 100, "", true},
 		{"c", 4, "", false},
 		{"c", 5, "c5", true},
 	}
@@ -558,9 +561,9 @@ func TestModel_Delete_UsesMaxSeqno(t *testing.T) {
 		t.Errorf("expected 'value', got %q", got)
 	}
 
-	// Via Get() (which uses MaxUint64), the tombstone wins
-	_, ok = m.Get([]byte("key"))
-	if ok {
-		t.Error("key should be deleted via Get() (tombstone at MaxUint64)")
+	// Via Get() (which uses MaxUint64), the tombstone wins — returns (nil, true)
+	val, ok := m.Get([]byte("key"))
+	if !ok || val != nil {
+		t.Errorf("expected (nil, true) for tombstone via Get(), got (%q, %v)", val, ok)
 	}
 }
