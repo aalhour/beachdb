@@ -741,6 +741,172 @@ func TestReader_FooterMetadata(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Metadata accessor tests
+// ---------------------------------------------------------------------------
+
+func TestReader_EntryCount(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "entrycount.sst")
+
+	entries := []struct {
+		key   keys.InternalKey
+		value []byte
+	}{
+		{putKey("a", 3), []byte("v1")},
+		{putKey("b", 2), []byte("v2")},
+		{putKey("c", 1), []byte("v3")},
+	}
+	writeSSTable(t, path, entries)
+
+	r := openReader(t, path)
+	defer r.Close()
+
+	if got := r.EntryCount(); got != 3 {
+		t.Fatalf("EntryCount() = %d, want 3", got)
+	}
+}
+
+func TestReader_EntryCount_Empty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.sst")
+
+	writeSSTable(t, path, nil)
+
+	r := openReader(t, path)
+	defer r.Close()
+
+	if got := r.EntryCount(); got != 0 {
+		t.Fatalf("EntryCount() = %d, want 0", got)
+	}
+}
+
+func TestReader_DataBlockCount(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blocks.sst")
+
+	// Use a tiny block size so 3 entries span multiple blocks
+	entries := []struct {
+		key   keys.InternalKey
+		value []byte
+	}{
+		{putKey("aaa", 3), []byte("value-1")},
+		{putKey("bbb", 2), []byte("value-2")},
+		{putKey("ccc", 1), []byte("value-3")},
+	}
+	writeSSTable(t, path, entries, WithBlockSize(32))
+
+	r := openReader(t, path)
+	defer r.Close()
+
+	if got := r.DataBlockCount(); got < 2 {
+		t.Fatalf("DataBlockCount() = %d, want at least 2 with block size 32", got)
+	}
+}
+
+func TestReader_IndexOffsetAndSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "index.sst")
+
+	entries := []struct {
+		key   keys.InternalKey
+		value []byte
+	}{
+		{putKey("x", 2), []byte("val-x")},
+		{putKey("y", 1), []byte("val-y")},
+	}
+	writeSSTable(t, path, entries)
+
+	r := openReader(t, path)
+	defer r.Close()
+
+	// The index block must sit after all data blocks and before the footer
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	indexEnd := r.IndexOffset() + uint64(r.IndexSize())
+	footerStart := uint64(fi.Size()) - uint64(footerSize) //nolint:gosec // test file, size always > footer
+	if indexEnd != footerStart {
+		t.Fatalf("index block ends at %d but footer starts at %d — gap or overlap", indexEnd, footerStart)
+	}
+
+	if r.IndexSize() == 0 {
+		t.Fatal("IndexSize() = 0, want > 0")
+	}
+}
+
+func TestReader_BlockInfo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blockinfo.sst")
+
+	entries := []struct {
+		key   keys.InternalKey
+		value []byte
+	}{
+		{putKey("aaa", 3), []byte("v1")},
+		{putKey("bbb", 2), []byte("v2")},
+		{putKey("ccc", 1), []byte("v3")},
+	}
+	writeSSTable(t, path, entries, WithBlockSize(32))
+
+	r := openReader(t, path)
+	defer r.Close()
+
+	n := r.DataBlockCount()
+	if n < 2 {
+		t.Fatalf("need at least 2 blocks for this test, got %d", n)
+	}
+
+	// Block offsets must be strictly increasing
+	var prevEnd uint64
+	for i := range n {
+		lastKey, offset, size := r.BlockInfo(int(i))
+		if size == 0 {
+			t.Fatalf("Block %d: size = 0", i)
+		}
+		if offset < prevEnd {
+			t.Fatalf("Block %d: offset %d overlaps previous block ending at %d", i, offset, prevEnd)
+		}
+		if len(lastKey.UserKey) == 0 {
+			t.Fatalf("Block %d: lastKey has empty UserKey", i)
+		}
+		prevEnd = offset + uint64(size)
+	}
+
+	// Last block's last key should be the last entry we wrote
+	lastKey, _, _ := r.BlockInfo(int(n - 1))
+	if string(lastKey.UserKey) != "ccc" {
+		t.Fatalf("last block lastKey = %q, want %q", lastKey.UserKey, "ccc")
+	}
+}
+
+func TestReader_BlockInfo_PanicOutOfRange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "panic.sst")
+
+	entries := []struct {
+		key   keys.InternalKey
+		value []byte
+	}{
+		{putKey("a", 1), []byte("v")},
+	}
+	writeSSTable(t, path, entries)
+
+	r := openReader(t, path)
+	defer r.Close()
+
+	defer func() {
+		if rec := recover(); rec == nil {
+			t.Fatal("expected panic for out-of-range BlockInfo, got none")
+		}
+	}()
+
+	// This should panic — index only has DataBlockCount() entries
+	r.BlockInfo(int(r.DataBlockCount()))
+}
+
 func TestReader_TruncatedFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "truncated.sst")

@@ -86,6 +86,33 @@ func (r *Reader) Close() error {
 	return nil
 }
 
+// EntryCount returns the total number of key-value entries in the SSTable.
+func (r *Reader) EntryCount() uint64 {
+	return r.footer.entryCount
+}
+
+// DataBlockCount returns the nimber of data blocks in the SSTable.
+func (r *Reader) DataBlockCount() uint32 {
+	return r.footer.dataBlockCount
+}
+
+// IndexOffset returns the size of the index block in bytes.
+func (r *Reader) IndexOffset() uint64 {
+	return r.footer.indexOffset
+}
+
+// IndexSize returns the size of the index block in bytes.
+func (r *Reader) IndexSize() uint32 {
+	return r.footer.indexSize
+}
+
+// BlockInfo returns the last key, file offset, and size for data block i.
+// Panics if i is out of range.
+func (r *Reader) BlockInfo(i int) (lastKey keys.InternalKey, offset uint64, size uint32) {
+	entry := r.index[i]
+	return entry.lastKey, entry.offset, entry.size
+}
+
 // Get scans the SSTable for the given userkey + seqno and returns its
 // value, if found; otherwise, error.
 func (r *Reader) Get(userKey []byte, seqno uint64) ([]byte, error) {
