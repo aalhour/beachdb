@@ -26,4 +26,7 @@ var (
 
 	// ErrInvalidMemtableFlushSize indicates that the size specified for flushing memtable is invalid.
 	ErrInvalidMemtableFlushSize = errors.New("beachdb: invalid memtable size flush trigger")
+
+	// ErrInvalidSSTBlockSize indicates that the SSTable block size is invalid.
+	ErrInvalidSSTBlockSize = errors.New("beachdb: invalid SSTable block size, must be > 0")
 )

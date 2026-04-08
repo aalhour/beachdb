@@ -32,6 +32,7 @@ type DB struct {
 	dir               string // Path on disk to write data into
 	syncOnWrite       bool   // Option: Whether the DB should fsync writes or not
 	memtableFlushSize int64  // Option: Flush threshold in bytes; 0 = no auto-flush
+	sstBlockSize      int    // Option: SSTable block size in bytes; 0 = use sstable default
 
 	// Concurrency
 	// - Writers interact with the `cond` via `mu.Lock()`, `cond.Wait()`, `cond.Signal()`
@@ -70,11 +71,17 @@ func Open(dir string, opts ...Option) (*DB, error) {
 		return nil, ErrInvalidMemtableFlushSize
 	}
 
+	// Validate the SSTable block size
+	if cfg.sstBlockSize < 0 {
+		return nil, ErrInvalidSSTBlockSize
+	}
+
 	// Initialize the DB struct
 	db := &DB{
 		dir:               dir,
 		syncOnWrite:       cfg.syncOnWrite,
 		memtableFlushSize: cfg.memtableFlushSize,
+		sstBlockSize:      cfg.sstBlockSize,
 		closed:            false,
 		mem:               memtable.NewSkipList(),
 		seqno:             0,
@@ -283,6 +290,17 @@ func (db *DB) Delete(ctx context.Context, key []byte) error {
 	return db.Write(ctx, b)
 }
 
+// Flush writes the active memtable to a new SSTable and waits for the flush
+// to complete before returning. It is a no-op if the memtable is empty.
+//
+// When auto-flush is enabled, Flush hands the memtable to the background
+// goroutine and stalls until that specific flush finishes — it does not bypass
+// or race with the background flush path. When auto-flush is disabled, the
+// flush runs synchronously in the caller's goroutine.
+func (db *DB) Flush() error {
+	return db.flushMemtable()
+}
+
 // Close closes the database and frees allocated resources.
 func (db *DB) Close() error {
 	if db == nil {
@@ -435,7 +453,7 @@ func (db *DB) flushLoop() {
 
 		// Release the lock for I/O - this is where the work happens
 		db.mu.Unlock()
-		newSSTableReader, err := writeSSTable(sstPath, imm)
+		newSSTableReader, err := writeSSTable(sstPath, imm, db.sstBlockSize)
 
 		// Re-acquire the lock to publish the results
 		db.mu.Lock()
@@ -484,11 +502,11 @@ func (db *DB) flushMemtable() error {
 		db.cond.Signal()
 
 		// Wait for this flush to complete
-		if db.immMem != nil {
+		for db.immMem != nil && !db.closed {
 			db.cond.Wait()
-			if db.closed {
-				return ErrDBClosed
-			}
+		}
+		if db.closed {
+			return ErrDBClosed
 		}
 
 		return db.flushErr
@@ -501,7 +519,7 @@ func (db *DB) flushMemtable() error {
 	db.nextSSTID++
 	db.mu.Unlock() // Release the lock for I/O operations
 
-	sstReader, err := writeSSTable(sstPath, imm)
+	sstReader, err := writeSSTable(sstPath, imm, db.sstBlockSize)
 
 	// Re-acquire the lock to publish the results
 	db.mu.Lock()
@@ -518,8 +536,9 @@ func (db *DB) nextSSTPath() string {
 	return filepath.Join(db.dir, buildSSTFileName(db.nextSSTID))
 }
 
-// Helper function for writing a memtable to an SSTable file on disk
-func writeSSTable(path string, mem memtable.Memtable) (*sstable.Reader, error) {
+// Helper function for writing a memtable to an SSTable file on disk.
+// blockSize controls the target data block size; 0 means use the sstable default.
+func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.Reader, error) {
 	// Create the new sstable file
 	sstFile, err := os.Create(path) //nolint:gosec // path constructed from trusted db.dir + formatted ID
 	if err != nil {
@@ -527,8 +546,14 @@ func writeSSTable(path string, mem memtable.Memtable) (*sstable.Reader, error) {
 	}
 	defer sstFile.Close()
 
+	// Build writer options — always sync, add block size if configured
+	writerOpts := []sstable.WriterOption{sstable.WithSync(true)}
+	if blockSize > 0 {
+		writerOpts = append(writerOpts, sstable.WithBlockSize(blockSize))
+	}
+
 	// Create the sstable writer
-	writer, err := sstable.NewWriter(sstFile, sstable.WithSync(true))
+	writer, err := sstable.NewWriter(sstFile, writerOpts...)
 	if err != nil {
 		_ = os.Remove(path)
 		return nil, fmt.Errorf("beachdb: creating SSTable writer: %w", err)
