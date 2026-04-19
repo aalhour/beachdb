@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/aalhour/beachdb/internal/crashhook"
 	"github.com/aalhour/beachdb/internal/keys"
 	"github.com/aalhour/beachdb/internal/memtable"
 	"github.com/aalhour/beachdb/internal/sstable"
@@ -186,6 +187,9 @@ func (db *DB) Write(ctx context.Context, b *Batch) error {
 	if err := db.wal.Append(encoded); err != nil {
 		return fmt.Errorf("beachdb: appending to WAL: %w", err)
 	}
+
+	// FAILPOINT: wal_after_append
+	crashhook.CrashIfArmed(crashhook.PointWALAfterAppend)
 
 	// Try to sync the WAL to disk if the option is set
 	if err := db.syncWALLocked(); err != nil {
@@ -404,9 +408,17 @@ func (db *DB) syncWALLocked() error {
 		beforeWALSync()
 	}
 
+	// FAILPOINT: wal_sync_error
+	if err := crashhook.MaybeFault(crashhook.FaultWALSyncError); err != nil {
+		return fmt.Errorf("beachdb: syncing WAL: %w", err)
+	}
+
 	if err := db.wal.Sync(); err != nil {
 		return fmt.Errorf("beachdb: syncing WAL: %w", err)
 	}
+
+	// FAILPOINT: wal_after_sync
+	crashhook.CrashIfArmed(crashhook.PointWALAfterSync)
 
 	return nil
 }
@@ -456,7 +468,7 @@ func (db *DB) maybeAutoFlushLocked() error {
 
 // replayWAL reads a WAL file, if it exists, and applies it to db.mem
 func replayWAL(db *DB, walFilePath string) error {
-	_, err := os.Stat(walFilePath)
+	_, err := os.Stat(walFilePath) //nolint:gosec // path is constructed from the trusted DB directory
 	if err != nil {
 		// If WAL doesn't exist, it's a fresh database
 		if os.IsNotExist(err) {
@@ -542,10 +554,12 @@ func (db *DB) flushLoop(doneCh chan struct{}) {
 			return
 		}
 
-		db.flushErr = nil
-		db.ssts = append(db.ssts, newSSTableReader)
-		db.immMem = nil
-		db.nextSSTID++
+		// Publish the new SSTable reader and clear the immutable memtable.
+		if err := db.publishFlushedSSTLocked(newSSTableReader); err != nil {
+			db.flushErr = err
+			db.cond.Broadcast()
+			return
+		}
 
 		// Wake stalled writers and anyone waiting on flush completion
 		db.cond.Broadcast()
@@ -554,6 +568,8 @@ func (db *DB) flushLoop(doneCh chan struct{}) {
 
 // flushMemtable is a synchronous helper function for writing the contents of `db.mem`
 // to a new SST file and replaces the memtable with a new one
+//
+//nolint:gocognit // flush coordination is stateful and shared with background flushing
 func (db *DB) flushMemtable() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -619,11 +635,33 @@ func (db *DB) flushMemtable() error {
 		db.cond.Broadcast()
 		return err
 	}
+
+	// Publish the new SSTable reader and clear the immutable memtable.
+	if err := db.publishFlushedSSTLocked(sstReader); err != nil {
+		db.flushErr = err
+		db.cond.Broadcast()
+		return err
+	}
+
+	db.cond.Broadcast()
+	return nil
+}
+
+// publishFlushedSSTLocked publishes a successfully flushed SSTable under db.mu.
+func (db *DB) publishFlushedSSTLocked(sstReader *sstable.Reader) error {
+	// FAILPOINT: sst_publish_error
+	if err := crashhook.MaybeFault(crashhook.FaultSSTPublishError); err != nil {
+		return fmt.Errorf("beachdb: publishing SSTable: %w", err)
+	}
+
 	db.flushErr = nil
 	db.ssts = append(db.ssts, sstReader)
 	db.immMem = nil
 	db.nextSSTID++
-	db.cond.Broadcast()
+
+	// FAILPOINT: flush_after_publish
+	crashhook.CrashIfArmed(crashhook.PointFlushAfterPublish)
+
 	return nil
 }
 
@@ -636,6 +674,11 @@ func (db *DB) nextSSTPath() string {
 // Helper function for writing a memtable to an SSTable file on disk.
 // blockSize controls the target data block size; 0 means use the sstable default.
 func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.Reader, error) {
+	// FAILPOINT: sst_write_error
+	if err := crashhook.MaybeFault(crashhook.FaultSSTWriteError); err != nil {
+		return nil, fmt.Errorf("beachdb: writing SSTable: %w", err)
+	}
+
 	// Create the new sstable file
 	sstFile, err := os.Create(path) //nolint:gosec // path constructed from trusted db.dir + formatted ID
 	if err != nil {
@@ -652,7 +695,7 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.R
 	// Create the sstable writer
 	writer, err := sstable.NewWriter(sstFile, writerOpts...)
 	if err != nil {
-		_ = os.Remove(path)
+		_ = os.Remove(path) //nolint:gosec // path is constructed from the trusted DB directory
 		return nil, fmt.Errorf("beachdb: creating SSTable writer: %w", err)
 	}
 
@@ -663,7 +706,7 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.R
 		if err := writer.Add(iter.Key(), iter.Value()); err != nil {
 			_ = writer.Close()
 			_ = iter.Close()
-			_ = os.Remove(path)
+			_ = os.Remove(path) //nolint:gosec // path is constructed from the trusted DB directory
 			return nil, fmt.Errorf("beachdb: writing entry to SSTable: %w", err)
 		}
 		iter.Next()
@@ -671,7 +714,7 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.R
 
 	_ = iter.Close()
 	if err = writer.Close(); err != nil {
-		_ = os.Remove(path)
+		_ = os.Remove(path) //nolint:gosec // path is constructed from the trusted DB directory
 		return nil, fmt.Errorf("beachdb: closing SSTable writer: %w", err)
 	}
 
@@ -679,6 +722,9 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.R
 	if err = syncDir(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("beachdb: syncing directory after flush: %w", err)
 	}
+
+	// FAILPOINT: flush_after_file_sync
+	crashhook.CrashIfArmed(crashhook.PointFlushAfterFileSync)
 
 	// Re-open the file for reading
 	sstFileReadMode, err := os.Open(path) //nolint:gosec // path constructed from trusted db.dir + formatted ID
