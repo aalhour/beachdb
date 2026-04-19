@@ -14,6 +14,7 @@ type Reader struct {
 	mu   sync.Mutex
 	file *os.File
 	buf  *bufio.Reader
+	pos  int64
 }
 
 // NewReader creates a new Reader for the WAL file at the given path.
@@ -66,7 +67,7 @@ func (r *Reader) Next() (payload []byte, err error) {
 	}
 
 	// Read N=payloadLen in bytes from the file
-	payload = make([]byte, payloadLen)
+	payload = make([]byte, int(payloadLen))
 	n, err = io.ReadFull(r.buf, payload)
 	if errors.Is(err, io.ErrUnexpectedEOF) || n < int(payloadLen) {
 		// Partial read: truncated payload
@@ -83,7 +84,22 @@ func (r *Reader) Next() (payload []byte, err error) {
 		return nil, err
 	}
 
+	r.pos += recordHeaderSize + int64(payloadLen)
+
 	return payload, nil
+}
+
+// ValidOffset returns the byte offset immediately after the last fully
+// validated record.
+func (r *Reader) ValidOffset() int64 {
+	if r == nil {
+		return 0
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.pos
 }
 
 // Close closes the reader and releases associated resources.

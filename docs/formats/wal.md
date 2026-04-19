@@ -77,6 +77,8 @@ A truncated record at the end of the WAL means the process crashed mid-write:
 
 - **Truncated header** (< 12 bytes): Ignore, treat as EOF.
 - **Truncated payload** (header valid, payload incomplete): Ignore, treat as EOF.
+- After recovery, truncate the WAL back to the last fully validated record
+  before reopening it for append.
 
 The incomplete record was never `fsync`'d, so the batch was never acknowledged to the caller. Discarding it is correct.
 

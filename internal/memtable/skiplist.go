@@ -156,13 +156,14 @@ func (sl *SkipList) Put(key keys.InternalKey, value []byte) {
 }
 
 // Get returns the value for the given userKey at or before the given seqno.
-// Returns (value, true) if found, (nil, false) if not found or deleted.
+// Returns (value, true) if found, (nil, false) if not found,
+// and (nil, true) when the newest visible version is a tombstone.
 //
 // Semantics: finds the newest version of userKey with seqno <= requested seqno.
-// If that version is a tombstone (KindDelete), returns (nil, false).
+// If that version is a tombstone (KindDelete), returns (nil, true).
 func (sl *SkipList) Get(userKey []byte, seqno uint64) (value []byte, found bool) {
-	sl.mu.Lock()
-	defer sl.mu.Unlock()
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
 
 	// Create a search key with the target seqno
 	// because seqno is descending, searching for (userKey, seqno) finds

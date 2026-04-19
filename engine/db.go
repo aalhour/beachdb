@@ -24,6 +24,17 @@ const (
 
 	// sstableFileExt specifies the extension of SSTable files.
 	sstableFileExt = ".sst"
+
+	// sstableFileIDWidth keeps lexicographic and numeric order aligned for all uint64 IDs.
+	sstableFileIDWidth = 20
+)
+
+var (
+	// writeSSTableFn allows tests to inject flush-time failures.
+	writeSSTableFn = writeSSTable
+
+	// beforeWALSync allows tests to observe the durability boundary before fsync.
+	beforeWALSync func()
 )
 
 // DB defines the database struct wrapping the public APIs.
@@ -90,12 +101,6 @@ func Open(dir string, opts ...Option) (*DB, error) {
 	// Init the concurrency `cond` field for write workloads
 	db.cond = sync.NewCond(&db.mu)
 
-	// Start the SSTable flushing goroutine if auto-flushing is enabled
-	if db.memtableFlushSize > 0 {
-		db.flushDoneCh = make(chan struct{})
-		go db.flushLoop()
-	}
-
 	// Construct the WAL file path
 	walFilePath := filepath.Join(dir, walFileName)
 
@@ -138,6 +143,7 @@ func Open(dir string, opts ...Option) (*DB, error) {
 		}
 		sstReader, err := sstable.OpenReader(sstableFile)
 		if err != nil {
+			_ = sstableFile.Close()
 			_ = db.Close()
 			return nil, fmt.Errorf("beachdb: reading SSTable %s: %w", fileName, err)
 		}
@@ -147,6 +153,13 @@ func Open(dir string, opts ...Option) (*DB, error) {
 	// Set the nextSSTID to point to the next free ID number
 	db.nextSSTID = nextSSTID
 
+	// Start the SSTable flushing goroutine only after Open succeeds.
+	if db.memtableFlushSize > 0 {
+		doneCh := make(chan struct{})
+		db.flushDoneCh = doneCh
+		go db.flushLoop(doneCh)
+	}
+
 	return db, nil
 }
 
@@ -155,61 +168,34 @@ func (db *DB) Write(ctx context.Context, b *Batch) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	// Check if the database was closed
-	if db.closed {
-		return ErrDBClosed
+	// Check write pre-conditions
+	if err := db.checkWritePreconditionsLocked(ctx); err != nil {
+		return err
 	}
 
-	// Check if already canceled before doing any work
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("beachdb: Write call canceled: %w", err)
-	}
-
-	// Encode the Batch and append it to the WAL
-	if b == nil {
+	// Make sure the batch is neither nil nor empty
+	if b == nil || b.Empty() {
 		return nil
 	}
-	encoded := b.Encode()
 
-	err := db.wal.Append(encoded)
-	if err != nil {
+	// Snapshot and encode once
+	ops := b.snapshot()
+	encoded := encodeOperations(ops)
+
+	// Append the changes to the WAL file via wal.Writer
+	if err := db.wal.Append(encoded); err != nil {
 		return fmt.Errorf("beachdb: appending to WAL: %w", err)
 	}
 
-	// Check whether we should fsync the WAL on write or not
-	if db.syncOnWrite {
-		// fsync can be slow - check context before the call
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("beachdb: Write call canceled: %w", err)
-		}
-
-		err = db.wal.Sync()
-		if err != nil {
-			return fmt.Errorf("beachdb: syncing WAL: %w", err)
-		}
+	// Try to sync the WAL to disk if the option is set
+	if err := db.syncWALLocked(); err != nil {
+		return err
 	}
 
-	// Apply the batch to the db (memtable)
-	db.applyBatch(b)
+	// Apply the Batch operations to Memtable
+	db.applyOperations(ops)
 
-	// Flush memtable to disk if auto-flusing is enabled and size threshold reached
-	if db.memtableFlushSize > 0 && db.mem.Size() >= db.memtableFlushSize {
-		for db.immMem != nil {
-			db.cond.Wait()
-			if db.closed {
-				return ErrDBClosed
-			}
-		}
-
-		// Swap: active memtable becomes immutable, fresh one takes over
-		db.immMem = db.mem
-		db.mem = memtable.NewSkipList()
-
-		// Wake the flush goroutine
-		db.cond.Signal()
-	}
-
-	return nil
+	return db.maybeAutoFlushLocked()
 }
 
 // Get returns the value associated with the given key or returns an ErrKeyNotFound.
@@ -360,7 +346,30 @@ func (db *DB) applyBatch(b *Batch) {
 		return
 	}
 
-	for _, op := range b.ops {
+	// Apply the Batch operations to Memtable
+	db.applyOperations(b.snapshot())
+}
+
+// checkWritePreconditionsLocked validates state required before a write can proceed.
+// db.mu must already be held.
+func (db *DB) checkWritePreconditionsLocked(ctx context.Context) error {
+	switch {
+	case db.closed:
+		return ErrDBClosed
+	case db.flushErr != nil:
+		return db.flushErr
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("beachdb: Write call canceled: %w", err)
+	}
+
+	return nil
+}
+
+// applyOperations applies a frozen batch of operations to the active memtable.
+func (db *DB) applyOperations(ops []operation) {
+	for _, op := range ops {
 		// Increase monotonic counter
 		db.seqno++
 
@@ -384,6 +393,67 @@ func (db *DB) applyBatch(b *Batch) {
 	}
 }
 
+// syncWALLocked flushes and syncs the WAL when sync-on-write is enabled.
+// db.mu must already be held.
+func (db *DB) syncWALLocked() error {
+	if !db.syncOnWrite {
+		return nil
+	}
+
+	if beforeWALSync != nil {
+		beforeWALSync()
+	}
+
+	if err := db.wal.Sync(); err != nil {
+		return fmt.Errorf("beachdb: syncing WAL: %w", err)
+	}
+
+	return nil
+}
+
+// waitForFlushSlotLocked waits for any in-flight immutable memtable flush to finish.
+// db.mu must already be held.
+func (db *DB) waitForFlushSlotLocked() error {
+	for db.immMem != nil {
+		if db.flushErr != nil {
+			return db.flushErr
+		}
+
+		db.cond.Wait()
+		switch {
+		case db.closed:
+			return ErrDBClosed
+		case db.flushErr != nil:
+			return db.flushErr
+		}
+	}
+
+	return nil
+}
+
+// maybeAutoFlushLocked rotates the active memtable when the flush threshold is reached.
+// db.mu must already be held.
+func (db *DB) maybeAutoFlushLocked() error {
+	// Nothing to do unless auto-flush is enabled and the active memtable crossed the threshold.
+	if db.memtableFlushSize == 0 || db.mem.Size() < db.memtableFlushSize {
+		return nil
+	}
+
+	// Auto-flush is single-flight: wait until any prior immutable memtable finishes publishing.
+	if err := db.waitForFlushSlotLocked(); err != nil {
+		return err
+	}
+
+	// Freeze the current memtable for the flusher and install a fresh writable memtable.
+	db.immMem = db.mem
+	db.mem = memtable.NewSkipList()
+
+	// Wake the background flusher now that there is immutable work ready to persist.
+	db.cond.Signal()
+
+	return nil
+}
+
 // replayWAL reads a WAL file, if it exists, and applies it to db.mem
 func replayWAL(db *DB, walFilePath string) error {
 	_, err := os.Stat(walFilePath)
@@ -403,45 +473,54 @@ func replayWAL(db *DB, walFilePath string) error {
 	defer reader.Close()
 
 	// Replay the WAL one record at a time
-	for {
+	for recordIdx := 0; ; recordIdx++ {
 		payload, err := reader.Next()
-		if errors.Is(err, io.EOF) {
+		switch {
+		case errors.Is(err, io.EOF):
 			// Clean end
 			// TODO: Log it as info
-			break
-		} else if errors.Is(err, wal.ErrTruncated) {
+			return nil
+		case errors.Is(err, wal.ErrTruncated):
 			// Incomplete write before crash, skip it
 			// TODO: Log it as info
-			break
-		} else if err != nil {
-			// IO errors, we should log them as warn
-			// TODO: Log as warn
-			break
+			if err := os.Truncate(walFilePath, reader.ValidOffset()); err != nil {
+				return fmt.Errorf("beachdb: truncating WAL tail during recovery: %w", err)
+			}
+			return nil
+		case err != nil:
+			return fmt.Errorf("beachdb: WAL recovery failed at record %d: %w", recordIdx, err)
 		}
 
 		// Decode the payload a Batch and replay it
 		batch, err := DecodeBatch(payload)
 		if err != nil {
-			// Corrupted batch - skip it
-			continue
+			return fmt.Errorf("beachdb: WAL recovery failed decoding batch %d: %w", recordIdx, err)
 		}
-		db.applyBatch(batch)
-	}
 
-	return nil
+		// Apply the Batch operations to Memtable
+		db.applyOperations(batch.ops)
+	}
 }
 
-func (db *DB) flushLoop() {
-	defer close(db.flushDoneCh)
+// flushLoop serializes background memtable flushes until shutdown or the first flush failure.
+func (db *DB) flushLoop(doneCh chan struct{}) {
+	defer close(doneCh)
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
+	defer func() {
+		if db.flushDoneCh == doneCh {
+			db.flushDoneCh = nil
+		}
+		db.mu.Unlock()
+	}()
 
 	for {
 		// Sleep until there is an immutable memtable to flush, or shutdown
 		for db.immMem == nil && !db.closed {
 			db.cond.Wait()
 		}
+
+		// If the database got closed in the meantime, return!
 		if db.closed {
 			return
 		}
@@ -449,24 +528,24 @@ func (db *DB) flushLoop() {
 		// Grab what we need under the lock
 		imm := db.immMem
 		sstPath := db.nextSSTPath()
-		db.nextSSTID++
 
 		// Release the lock for I/O - this is where the work happens
 		db.mu.Unlock()
-		newSSTableReader, err := writeSSTable(sstPath, imm, db.sstBlockSize)
+		newSSTableReader, err := writeSSTableFn(sstPath, imm, db.sstBlockSize)
 
 		// Re-acquire the lock to publish the results
 		db.mu.Lock()
 
 		if err != nil {
 			db.flushErr = err
-			// Leave immMem in place - data is still readable there andi n the WAL.
-			// A future retry mechanism could clear this, but for v0.0.3 the error
-			// is surfaced and the data is safe.
-		} else {
-			db.ssts = append(db.ssts, newSSTableReader)
-			db.immMem = nil
+			db.cond.Broadcast()
+			return
 		}
+
+		db.flushErr = nil
+		db.ssts = append(db.ssts, newSSTableReader)
+		db.immMem = nil
+		db.nextSSTID++
 
 		// Wake stalled writers and anyone waiting on flush completion
 		db.cond.Broadcast()
@@ -482,6 +561,9 @@ func (db *DB) flushMemtable() error {
 	if db.closed {
 		return ErrDBClosed
 	}
+	if db.flushErr != nil {
+		return db.flushErr
+	}
 
 	if db.mem.Empty() {
 		return nil // Nothing to flush
@@ -489,9 +571,15 @@ func (db *DB) flushMemtable() error {
 
 	// Wait for any in-progress flush to complete
 	for db.immMem != nil {
+		if db.flushErr != nil {
+			return db.flushErr
+		}
 		db.cond.Wait()
 		if db.closed {
 			return ErrDBClosed
+		}
+		if db.flushErr != nil {
+			return db.flushErr
 		}
 	}
 
@@ -504,6 +592,9 @@ func (db *DB) flushMemtable() error {
 		// Wait for this flush to complete
 		for db.immMem != nil && !db.closed {
 			db.cond.Wait()
+			if db.flushErr != nil {
+				return db.flushErr
+			}
 		}
 		if db.closed {
 			return ErrDBClosed
@@ -514,19 +605,25 @@ func (db *DB) flushMemtable() error {
 
 	// No goroutine - do it synchronously
 	imm := db.mem
+	db.immMem = imm
 	db.mem = memtable.NewSkipList()
 	sstPath := db.nextSSTPath()
-	db.nextSSTID++
 	db.mu.Unlock() // Release the lock for I/O operations
 
-	sstReader, err := writeSSTable(sstPath, imm, db.sstBlockSize)
+	sstReader, err := writeSSTableFn(sstPath, imm, db.sstBlockSize)
 
 	// Re-acquire the lock to publish the results
 	db.mu.Lock()
 	if err != nil {
+		db.flushErr = err
+		db.cond.Broadcast()
 		return err
 	}
+	db.flushErr = nil
 	db.ssts = append(db.ssts, sstReader)
+	db.immMem = nil
+	db.nextSSTID++
+	db.cond.Broadcast()
 	return nil
 }
 
@@ -542,7 +639,7 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.R
 	// Create the new sstable file
 	sstFile, err := os.Create(path) //nolint:gosec // path constructed from trusted db.dir + formatted ID
 	if err != nil {
-		return nil, ErrCreatingSSTFile
+		return nil, fmt.Errorf("%w: %w", ErrCreatingSSTFile, err)
 	}
 	defer sstFile.Close()
 
@@ -592,6 +689,7 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.R
 	// Create a reader for the newest sstable
 	sstReader, err := sstable.OpenReader(sstFileReadMode)
 	if err != nil {
+		_ = sstFileReadMode.Close()
 		return nil, fmt.Errorf("beachdb: error reading newly flushed SSTable: %w", err)
 	}
 
@@ -605,7 +703,13 @@ func discoverSSTables(dir string) ([]string, uint64, error) {
 		return nil, 0, fmt.Errorf("beachdb: reading directory: %w", err)
 	}
 
-	sstableFiles := make([]string, 0, len(dirEntries))
+	type sstableMeta struct {
+		id   uint64
+		name string
+	}
+
+	sstableFiles := make([]sstableMeta, 0, len(dirEntries))
+	seenIDs := make(map[uint64]string, len(dirEntries))
 
 	for _, entry := range dirEntries {
 		if !entry.Type().IsRegular() {
@@ -617,30 +721,48 @@ func discoverSSTables(dir string) ([]string, uint64, error) {
 			continue
 		}
 
-		sstableFiles = append(sstableFiles, fileName)
-	}
-
-	slices.Sort(sstableFiles)
-
-	var maxID uint64
-	n := len(sstableFiles)
-	if n > 0 {
-		biggestName := sstableFiles[n-1]
-		strID := strings.TrimSuffix(biggestName, filepath.Ext(biggestName))
-
+		strID := strings.TrimSuffix(fileName, filepath.Ext(fileName))
 		parsedID, err := strconv.ParseUint(strID, 10, 64)
 		if err != nil {
-			return sstableFiles, 0, fmt.Errorf("beachdb: parsing SSTable ID %q: %w", biggestName, err)
+			return nil, 0, fmt.Errorf("beachdb: parsing SSTable ID %q: %w", fileName, err)
+		}
+		if existingName, exists := seenIDs[parsedID]; exists {
+			return nil, 0, fmt.Errorf("beachdb: duplicate SSTable ID %d in %q and %q", parsedID, existingName, fileName)
 		}
 
-		maxID = parsedID + 1
+		seenIDs[parsedID] = fileName
+		sstableFiles = append(sstableFiles, sstableMeta{
+			id:   parsedID,
+			name: fileName,
+		})
 	}
 
-	return sstableFiles, maxID, nil
+	slices.SortFunc(sstableFiles, func(left, right sstableMeta) int {
+		switch {
+		case left.id < right.id:
+			return -1
+		case left.id > right.id:
+			return 1
+		default:
+			return strings.Compare(left.name, right.name)
+		}
+	})
+
+	names := make([]string, len(sstableFiles))
+	for i, file := range sstableFiles {
+		names[i] = file.name
+	}
+
+	var nextID uint64
+	if len(sstableFiles) > 0 {
+		nextID = sstableFiles[len(sstableFiles)-1].id + 1
+	}
+
+	return names, nextID, nil
 }
 
 // Helper function for building an SSTable file name from a
 // file ID number, e.g.: 1 --> 000001.sst
 func buildSSTFileName(id uint64) string {
-	return fmt.Sprintf("%06d.sst", id)
+	return fmt.Sprintf("%0*d%s", sstableFileIDWidth, id, sstableFileExt)
 }

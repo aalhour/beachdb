@@ -513,7 +513,7 @@ func TestReader_Next(t *testing.T) {
 		header[11] = 0x00
 
 		// Only provide 10 bytes of payload
-		data := append(header, make([]byte, 10)...)
+		data := append(append([]byte(nil), header...), make([]byte, 10)...)
 		//nolint:gosec // G306: 0644 is acceptable for test files
 		os.WriteFile(path, data, 0644)
 
@@ -565,6 +565,32 @@ func TestReader_Next(t *testing.T) {
 		_, err := r.Next()
 		if !errors.Is(err, ErrUnsupportedVersion) {
 			t.Errorf("expected ErrUnsupportedVersion, got %v", err)
+		}
+	})
+
+	t.Run("returns error on oversized payload length", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "oversized_payload.wal")
+
+		header := make([]byte, recordHeaderSize)
+		header[0] = 0xBE
+		header[1] = 0xAC
+		header[2] = 0x01
+		header[3] = 0x01
+		header[4] = 0x04 // 64 MiB + 1
+		header[5] = 0x00
+		header[6] = 0x00
+		header[7] = 0x01
+		//nolint:gosec // G306: 0644 is acceptable for test files
+		if err := os.WriteFile(path, header, 0644); err != nil {
+			t.Fatalf("failed to write oversized header: %v", err)
+		}
+
+		r, _ := NewReader(path)
+		defer r.Close()
+
+		_, err := r.Next()
+		if !errors.Is(err, ErrRecordTooLarge) {
+			t.Errorf("expected ErrRecordTooLarge, got %v", err)
 		}
 	})
 
@@ -890,6 +916,158 @@ func TestReader_Next_ManualRecordConstruction(t *testing.T) {
 		}
 		if !slices.Equal(got, payload) {
 			t.Errorf("got %q, want %q", got, payload)
+		}
+	})
+}
+
+func TestReader_ValidOffsetProgression(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "offset_progress.wal")
+	payloads := [][]byte{
+		[]byte("first"),
+		[]byte("second"),
+	}
+
+	w, err := NewWriter(path)
+	if err != nil {
+		t.Fatalf("NewWriter failed: %v", err)
+	}
+	for _, payload := range payloads {
+		if err := w.Append(payload); err != nil {
+			t.Fatalf("Append failed: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Writer.Close failed: %v", err)
+	}
+
+	r, err := NewReader(path)
+	if err != nil {
+		t.Fatalf("NewReader failed: %v", err)
+	}
+	defer r.Close()
+
+	var expectedOffset int64
+	for i, payload := range payloads {
+		got, err := r.Next()
+		if err != nil {
+			t.Fatalf("Next #%d failed: %v", i, err)
+		}
+		if !slices.Equal(got, payload) {
+			t.Fatalf("record #%d mismatch: got %q want %q", i, got, payload)
+		}
+
+		expectedOffset += int64(recordHeaderSize + len(payload))
+		if gotOffset := r.ValidOffset(); gotOffset != expectedOffset {
+			t.Fatalf("offset after record #%d = %d, want %d", i, gotOffset, expectedOffset)
+		}
+	}
+
+	_, err = r.Next()
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("expected EOF after all records, got %v", err)
+	}
+	if gotOffset := r.ValidOffset(); gotOffset != expectedOffset {
+		t.Fatalf("offset changed after EOF: got %d, want %d", gotOffset, expectedOffset)
+	}
+}
+
+func TestReader_ValidOffsetDoesNotAdvanceOnCorruptionOrTruncation(t *testing.T) {
+	t.Run("checksum mismatch keeps last valid offset", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "checksum_offset.wal")
+		first := []byte("first")
+		second := []byte("second")
+
+		w, err := NewWriter(path)
+		if err != nil {
+			t.Fatalf("NewWriter failed: %v", err)
+		}
+		if err := w.Append(first); err != nil {
+			t.Fatalf("Append first failed: %v", err)
+		}
+		if err := w.Append(second); err != nil {
+			t.Fatalf("Append second failed: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Writer.Close failed: %v", err)
+		}
+
+		// Corrupt a byte in the second payload.
+		//nolint:gosec // G304: path is controlled by test
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile failed: %v", err)
+		}
+		firstRecordBytes := recordHeaderSize + len(first)
+		data[firstRecordBytes+recordHeaderSize] ^= 0x01
+		if err := os.WriteFile(path, data, 0o644); err != nil { //nolint:gosec // test file
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		r, err := NewReader(path)
+		if err != nil {
+			t.Fatalf("NewReader failed: %v", err)
+		}
+		defer r.Close()
+
+		if _, err := r.Next(); err != nil {
+			t.Fatalf("first Next failed: %v", err)
+		}
+		validAfterFirst := r.ValidOffset()
+
+		_, err = r.Next()
+		if !errors.Is(err, ErrChecksum) {
+			t.Fatalf("expected ErrChecksum, got %v", err)
+		}
+		if got := r.ValidOffset(); got != validAfterFirst {
+			t.Fatalf("offset advanced after checksum error: got %d, want %d", got, validAfterFirst)
+		}
+	})
+
+	t.Run("truncated payload keeps last valid offset", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "truncated_offset.wal")
+		first := []byte("first")
+		second := []byte("second")
+
+		w, err := NewWriter(path)
+		if err != nil {
+			t.Fatalf("NewWriter failed: %v", err)
+		}
+		if err := w.Append(first); err != nil {
+			t.Fatalf("Append first failed: %v", err)
+		}
+		if err := w.Append(second); err != nil {
+			t.Fatalf("Append second failed: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Writer.Close failed: %v", err)
+		}
+
+		// Remove one byte from the final payload.
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat failed: %v", err)
+		}
+		if err := os.Truncate(path, info.Size()-1); err != nil {
+			t.Fatalf("Truncate failed: %v", err)
+		}
+
+		r, err := NewReader(path)
+		if err != nil {
+			t.Fatalf("NewReader failed: %v", err)
+		}
+		defer r.Close()
+
+		if _, err := r.Next(); err != nil {
+			t.Fatalf("first Next failed: %v", err)
+		}
+		validAfterFirst := r.ValidOffset()
+
+		_, err = r.Next()
+		if !errors.Is(err, ErrTruncated) {
+			t.Fatalf("expected ErrTruncated, got %v", err)
+		}
+		if got := r.ValidOffset(); got != validAfterFirst {
+			t.Fatalf("offset advanced after truncated record: got %d, want %d", got, validAfterFirst)
 		}
 	})
 }

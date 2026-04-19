@@ -19,6 +19,7 @@ linters:
     - perfsprint      # Use strconv instead of fmt.Sprintf where possible
     - staticcheck     # Static code analysis linter
     - lll             # Line length limit (readability in storage code)
+    - gocritic        # Opinionated and idiomatic Go practices
 
     # ─────────────────────────────────────────────────────────────────────────
     # Code complexity
@@ -38,7 +39,7 @@ linters:
     # Context and concurrency
     # ─────────────────────────────────────────────────────────────────────────
     - contextcheck    # Check context.Context usage
-    - noctx           # Detect http requests without context
+    - noctx           # Detect func calls without context
 
     # ─────────────────────────────────────────────────────────────────────────
     # Style and formatting
@@ -50,16 +51,14 @@ linters:
     # ─────────────────────────────────────────────────────────────────────────
     # Bug detection
     # ─────────────────────────────────────────────────────────────────────────
-    - bodyclose       # Check HTTP response body is closed
     - durationcheck   # Detect bad time.Duration multiplication
     - nilerr          # Check for returning nil when err is not nil
     - nilnil          # Detect returning (nil, nil)
-    - rowserrcheck    # Check sql.Rows.Err() is called
-    - sqlclosecheck   # Check sql.Rows/Stmt are closed
 
     # ─────────────────────────────────────────────────────────────────────────
     # Code hygiene
     # ─────────────────────────────────────────────────────────────────────────
+    - thelper         # Detect test helpers without t.Helper() call
     - unconvert       # Remove unnecessary type conversions
     - unparam         # Find unused function parameters
     - wastedassign    # Find wasted assignments
@@ -99,7 +98,7 @@ linters:
       errorf: true
       asserts: true
       comparison: true
-
+    
     # Revive settings (style linter)
     revive:
       rules:
@@ -167,6 +166,7 @@ linters:
           - funlen
           - gocyclo
           - gocognit
+          - gocritic
 
       # Exclude some linters from running on tests
       - path: _test\.go

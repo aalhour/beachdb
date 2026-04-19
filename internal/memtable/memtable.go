@@ -6,7 +6,8 @@ import "github.com/aalhour/beachdb/internal/keys"
 type Memtable interface {
 	Put(key keys.InternalKey, value []byte) // Insert a key-value pair
 	// Get retrieves a value at the given seqno.
-	// Returns (nil, false) if the key was not found or was deleted.
+	// Returns (nil, false) if the key was not found,
+	// and (nil, true) when the newest visible version is a tombstone.
 	Get(userKey []byte, seqno uint64) ([]byte, bool)
 	NewIterator() Iterator // Create an iterator over entries
 	Len() int              // Number of entries

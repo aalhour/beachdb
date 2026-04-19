@@ -334,6 +334,100 @@ func TestDB_ContextDeadline(t *testing.T) {
 	}
 }
 
+func TestDB_Write_CommitsOnceWALAppendStarts(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	prevHook := beforeWALSync
+	beforeWALSync = cancel
+	t.Cleanup(func() {
+		beforeWALSync = prevHook
+	})
+
+	batch := NewBatch()
+	batch.Put([]byte("key"), []byte("value"))
+
+	if err := db.Write(ctx, batch); err != nil {
+		t.Fatalf("expected write to commit once WAL append started, got %v", err)
+	}
+
+	got, err := db.Get(context.Background(), []byte("key"))
+	if err != nil {
+		t.Fatalf("failed to read committed value: %v", err)
+	}
+	if !slices.Equal(got, []byte("value")) {
+		t.Fatalf("expected %q, got %q", []byte("value"), got)
+	}
+}
+
+func TestDB_Write_CanceledBeforeAppendDoesNotCommit(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	batch := NewBatch()
+	batch.Put([]byte("key"), []byte("value"))
+
+	if err := db.Write(ctx, batch); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+
+	_, err = db.Get(context.Background(), []byte("key"))
+	if !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("expected canceled write to leave key absent, got %v", err)
+	}
+}
+
+func TestDB_Write_NoOpBatchDoesNotMutateState(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	defer db.Close()
+
+	walPath := filepath.Join(dir, walFileName)
+	beforeInfo, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatalf("failed to stat WAL before writes: %v", err)
+	}
+
+	beforeSeq := db.seqno
+	if err := db.Write(context.Background(), nil); err != nil {
+		t.Fatalf("nil batch write failed: %v", err)
+	}
+
+	empty := NewBatch()
+	if err := db.Write(context.Background(), empty); err != nil {
+		t.Fatalf("empty batch write failed: %v", err)
+	}
+
+	afterInfo, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatalf("failed to stat WAL after writes: %v", err)
+	}
+
+	if db.seqno != beforeSeq {
+		t.Fatalf("seqno changed for no-op writes: got %d, want %d", db.seqno, beforeSeq)
+	}
+	if afterInfo.Size() != beforeInfo.Size() {
+		t.Fatalf("WAL size changed for no-op writes: got %d, want %d", afterInfo.Size(), beforeInfo.Size())
+	}
+}
+
 func TestDB_ConcurrentWrites(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)

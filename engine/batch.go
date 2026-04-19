@@ -42,12 +42,16 @@ type OpType byte
 // EncodingVersion is the current batch encoding format version.
 const EncodingVersion byte = 0x01 // v1
 
+// batchHeaderSize is the fixed-size prefix for every encoded batch.
+const batchHeaderSize = 8
+
 // Operation Types
 const (
 	OpTypePut OpType = iota + 1
 	OpTypeDelete
 )
 
+// operation stores one logical mutation inside a batch.
 type operation struct {
 	opType OpType
 	key    []byte
@@ -58,6 +62,35 @@ type operation struct {
 type Batch struct {
 	mu  sync.RWMutex
 	ops []operation
+}
+
+// cloneBytes copies a byte slice while preserving nil slices.
+func cloneBytes(src []byte) []byte {
+	if src == nil {
+		return nil
+	}
+
+	dst := make([]byte, len(src))
+	copy(dst, src)
+	return dst
+}
+
+// cloneOperations deep-copies a batch operation slice.
+func cloneOperations(ops []operation) []operation {
+	if len(ops) == 0 {
+		return nil
+	}
+
+	cloned := make([]operation, len(ops))
+	for i, op := range ops {
+		cloned[i] = operation{
+			opType: op.opType,
+			key:    cloneBytes(op.key),
+			value:  cloneBytes(op.value),
+		}
+	}
+
+	return cloned
 }
 
 // NewBatch creates an empty Batch ready for Put and Delete operations.
@@ -103,6 +136,11 @@ func (b *Batch) Delete(key []byte) {
 	})
 }
 
+// Empty returns whether the batch is empty or not.
+func (b *Batch) Empty() bool {
+	return b.Count() == 0
+}
+
 // Count returns the number of operations in the batch.
 func (b *Batch) Count() int {
 	// Hold a read lock
@@ -123,6 +161,18 @@ func (b *Batch) Reset() {
 	b.ops = b.ops[:0]
 }
 
+// snapshot returns an immutable copy of the batch contents.
+func (b *Batch) snapshot() []operation {
+	if b == nil {
+		return nil
+	}
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	return cloneOperations(b.ops)
+}
+
 // Encode serializes the batch operations to a byte slice.
 // The encoding is deterministic: the same batch always produces the same bytes.
 func (b *Batch) Encode() []byte {
@@ -130,9 +180,14 @@ func (b *Batch) Encode() []byte {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
+	return encodeOperations(b.ops)
+}
+
+// encodeOperations serializes a pre-snapshotted operation slice.
+func encodeOperations(ops []operation) []byte {
 	// Pre-calculate the size of the buffer
-	size := 8 // header
-	for _, op := range b.ops {
+	size := batchHeaderSize // header
+	for _, op := range ops {
 		size += 1 + 4 + len(op.key) // op_type + key_len + key
 		if op.opType == OpTypePut {
 			size += 4 + len(op.value) // value_len + value
@@ -145,15 +200,15 @@ func (b *Batch) Encode() []byte {
 	// Write the header
 	buf[0] = EncodingVersion         // version, e.g.: 0x01
 	buf[1], buf[2], buf[3] = 0, 0, 0 // reserved
-	if len(b.ops) > math.MaxUint32 {
+	if len(ops) > math.MaxUint32 {
 		panic("batch: too many operations")
 	}
-	//nolint:gosec // G115: len(b.ops) is validated above, overflow not possible
-	coding.PutUint32(buf[4:], uint32(len(b.ops)))
+	//nolint:gosec // G115: len(ops) is validated above, overflow not possible
+	coding.PutUint32(buf[4:], uint32(len(ops)))
 
 	// Write each op
-	offset := 8
-	for _, op := range b.ops {
+	offset := batchHeaderSize
+	for _, op := range ops {
 		// Write the op type and increment offset (1 byte)
 		buf[offset] = byte(op.opType)
 		offset++
@@ -195,9 +250,15 @@ func DecodeBatch(data []byte) (*Batch, error) {
 		return nil, ErrBadVersion
 	}
 
-	// Skip reserved bytes
-	if _, err := r.ReadBytes(3); err != nil {
+	// Reserved bytes must stay zero in v1 so future extensions stay explicit.
+	reserved, err := r.ReadBytes(3)
+	if err != nil {
 		return nil, ErrCorruptBatch
+	}
+	for _, b := range reserved {
+		if b != 0 {
+			return nil, ErrCorruptBatch
+		}
 	}
 
 	// Read op count
@@ -216,9 +277,14 @@ func DecodeBatch(data []byte) (*Batch, error) {
 		batch.ops = append(batch.ops, *op)
 	}
 
+	if r.Remaining() != 0 {
+		return nil, ErrCorruptBatch
+	}
+
 	return batch, nil
 }
 
+// decodeOperation decodes one batch operation from the byte reader.
 func decodeOperation(reader *coding.ByteReader) (*operation, error) {
 	opTypeByte, err := reader.ReadByte()
 	if err != nil {

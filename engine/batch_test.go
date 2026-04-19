@@ -320,6 +320,14 @@ func TestBatchDecode(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "non-zero reserved bytes are rejected",
+			input: []byte{
+				1, 0, 1, 0,
+				0, 0, 0, 0,
+			},
+			wantErr: true,
+		},
+		{
 			name: "op_count=1 but truncated after header",
 			input: []byte{
 				1, 0, 0, 0,
@@ -407,6 +415,18 @@ func TestBatchDecode(t *testing.T) {
 				0, 0, 0, 2, // op_count = 2
 				1, 0, 0, 0, 1, 'a', 0, 0, 0, 2, 'b', 'c',
 				// Missing second op
+			},
+			wantErr: true,
+		},
+		{
+			name: "trailing garbage is rejected",
+			input: []byte{
+				1, 0, 0, 0,
+				0, 0, 0, 1,
+				2,
+				0, 0, 0, 3,
+				'b', 'a', 'z',
+				0xFF,
 			},
 			wantErr: true,
 		},

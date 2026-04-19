@@ -33,6 +33,10 @@ func NewWriter(path string) (*Writer, error) {
 
 // Append writes a new WAL record containing the given payload.
 func (w *Writer) Append(payload []byte) error {
+	if len(payload) > maxRecordPayloadSize {
+		return ErrRecordTooLarge
+	}
+
 	// First, encode the payload outside the lock
 	record := EncodeRecord(payload)
 

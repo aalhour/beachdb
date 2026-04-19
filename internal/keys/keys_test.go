@@ -336,3 +336,17 @@ func TestEncodeDecodeRoundtrip(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeInternalKeyRejectsInvalidKind(t *testing.T) {
+	data := append(
+		append(
+			[]byte("key"),
+			0, 0, 0, 0, 0, 0, 0, 42,
+		),
+		0xFF,
+	)
+
+	if _, err := DecodeInternalKey(data); err == nil {
+		t.Fatal("expected invalid internal key kind to be rejected")
+	}
+}

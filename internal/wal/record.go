@@ -16,6 +16,10 @@ const (
 	// recordHeaderSize is the size of a WAL record header in bytes.
 	recordHeaderSize = 12
 
+	// maxRecordPayloadSize caps record allocations during recovery.
+	// v1 does not support fragmentation, so oversized batches are rejected.
+	maxRecordPayloadSize = 64 << 20
+
 	// RecordTypeFull indicates a complete record.
 	RecordTypeFull byte = 0x01
 )
@@ -67,6 +71,9 @@ func DecodeRecordHeader(header []byte) (payloadLen uint32, checksum uint32, err 
 	}
 
 	payloadLen = coding.Uint32(header[4:8])
+	if payloadLen > maxRecordPayloadSize {
+		return 0, 0, ErrRecordTooLarge
+	}
 	checksum = coding.Uint32(header[8:])
 
 	return payloadLen, checksum, nil

@@ -9,7 +9,9 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/aalhour/beachdb/internal/memtable"
 	"github.com/aalhour/beachdb/internal/sstable"
 )
 
@@ -153,10 +155,10 @@ func TestBuildSSTFileName(t *testing.T) {
 		id   uint64
 		want string
 	}{
-		{0, "000000.sst"},
-		{1, "000001.sst"},
-		{42, "000042.sst"},
-		{999999, "999999.sst"},
+		{0, "00000000000000000000.sst"},
+		{1, "00000000000000000001.sst"},
+		{42, "00000000000000000042.sst"},
+		{999999, "00000000000000999999.sst"},
 	}
 	for _, tt := range tests {
 		got := buildSSTFileName(tt.id)
@@ -222,7 +224,7 @@ func TestFlush_ProducesValidSSTable(t *testing.T) {
 	}
 
 	// SST file should exist on disk
-	sstPath := filepath.Join(dir, "000000.sst")
+	sstPath := filepath.Join(dir, buildSSTFileName(0))
 	if _, err := os.Stat(sstPath); err != nil {
 		t.Fatalf("SST file not found: %v", err)
 	}
@@ -405,6 +407,56 @@ func TestFlush_WritesAfterFlush(t *testing.T) {
 	}
 }
 
+func TestFlush_SynchronousFailurePreservesReadableData(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.Put(ctx, []byte("key"), []byte("value")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	flushFailure := errors.New("forced flush failure")
+	prevWriteSSTableFn := writeSSTableFn
+	writeSSTableFn = func(string, memtable.Memtable, int) (*sstable.Reader, error) {
+		return nil, flushFailure
+	}
+	t.Cleanup(func() {
+		writeSSTableFn = prevWriteSSTableFn
+	})
+
+	err = db.flushMemtable()
+	if !errors.Is(err, flushFailure) {
+		t.Fatalf("expected flush failure, got %v", err)
+	}
+
+	got, err := db.Get(ctx, []byte("key"))
+	if err != nil {
+		t.Fatalf("expected key to remain readable after failed flush, got %v", err)
+	}
+	if !slices.Equal(got, []byte("value")) {
+		t.Fatalf("Get(key) = %q, want %q", got, "value")
+	}
+
+	if len(db.ssts) != 0 {
+		t.Fatalf("expected no SSTs to be published on failed flush, got %d", len(db.ssts))
+	}
+	if db.nextSSTID != 0 {
+		t.Fatalf("expected nextSSTID to stay at 0 after failed flush, got %d", db.nextSSTID)
+	}
+	if db.immMem == nil {
+		t.Fatal("expected failed synchronous flush to keep the frozen memtable readable")
+	}
+
+	if err := db.Put(ctx, []byte("later"), []byte("value")); !errors.Is(err, flushFailure) {
+		t.Fatalf("expected subsequent writes to fail with flush error, got %v", err)
+	}
+}
+
 // Multiple flushes produce distinct, valid SSTable files
 func TestFlush_MultipleFlushes(t *testing.T) {
 	dir := t.TempDir()
@@ -515,6 +567,75 @@ func TestDiscoverSSTables_EmptyDir(t *testing.T) {
 	}
 	if nextID != 0 {
 		t.Fatalf("expected nextID=0, got %d", nextID)
+	}
+}
+
+func TestDiscoverSSTables_RejectsMalformedName(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(dir, "not-a-number.sst"), []byte("junk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := discoverSSTables(dir)
+	if err == nil {
+		t.Fatal("expected malformed SSTable name to fail discovery")
+	}
+}
+
+func TestDiscoverSSTables_SortsByNumericID(t *testing.T) {
+	dir := t.TempDir()
+
+	for _, name := range []string{"10.sst", "2.sst", "000001.sst"} {
+		path := filepath.Join(dir, name)
+		f, err := os.Create(path) //nolint:gosec // test with known temp path
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, err := sstable.NewWriter(f, sstable.WithSync(false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files, nextID, err := discoverSSTables(dir)
+	if err != nil {
+		t.Fatalf("discoverSSTables: %v", err)
+	}
+
+	expected := []string{"000001.sst", "2.sst", "10.sst"}
+	if !slices.Equal(files, expected) {
+		t.Fatalf("expected %v, got %v", expected, files)
+	}
+	if nextID != 11 {
+		t.Fatalf("expected nextID=11, got %d", nextID)
+	}
+}
+
+func TestDiscoverSSTables_RejectsDuplicateNumericID(t *testing.T) {
+	dir := t.TempDir()
+
+	for _, name := range []string{"1.sst", "000001.sst"} {
+		path := filepath.Join(dir, name)
+		f, err := os.Create(path) //nolint:gosec // test with known temp path
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, err := sstable.NewWriter(f, sstable.WithSync(false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, _, err := discoverSSTables(dir)
+	if err == nil {
+		t.Fatal("expected duplicate numeric SSTable IDs to fail discovery")
 	}
 }
 
@@ -1097,6 +1218,60 @@ func TestDB_AutoFlush_CloseWaitsForFlush(t *testing.T) {
 	// SST file must exist on disk
 	if n := countSSTFiles(t, dir); n < 1 {
 		t.Fatalf("expected at least 1 SST file after close, got %d", n)
+	}
+}
+
+func TestDB_AutoFlush_FailureStopsFurtherWrites(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false), WithMemtableFlushSize(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	flushFailure := errors.New("forced auto-flush failure")
+	prevWriteSSTableFn := writeSSTableFn
+	writeSSTableFn = func(string, memtable.Memtable, int) (*sstable.Reader, error) {
+		return nil, flushFailure
+	}
+	t.Cleanup(func() {
+		writeSSTableFn = prevWriteSSTableFn
+	})
+
+	ctx := context.Background()
+	if err := db.Put(ctx, []byte("key"), []byte("value")); err != nil {
+		t.Fatalf("initial Put: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		db.mu.RLock()
+		err = db.flushErr
+		done := db.flushDoneCh == nil
+		db.mu.RUnlock()
+		if errors.Is(err, flushFailure) && done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !errors.Is(err, flushFailure) {
+		t.Fatalf("expected auto-flush failure to be recorded, got %v", err)
+	}
+
+	got, err := db.Get(ctx, []byte("key"))
+	if err != nil {
+		t.Fatalf("expected key to remain readable after failed auto-flush, got %v", err)
+	}
+	if !slices.Equal(got, []byte("value")) {
+		t.Fatalf("Get(key) = %q, want %q", got, "value")
+	}
+
+	if err := db.Put(ctx, []byte("later"), []byte("value")); !errors.Is(err, flushFailure) {
+		t.Fatalf("expected writes after auto-flush failure to fail, got %v", err)
+	}
+
+	if err := db.Flush(); !errors.Is(err, flushFailure) {
+		t.Fatalf("expected Flush after auto-flush failure to return flush error, got %v", err)
 	}
 }
 

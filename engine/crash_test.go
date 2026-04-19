@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/aalhour/beachdb/internal/testutil"
+	"github.com/aalhour/beachdb/internal/wal"
 )
 
 // TestDB_CrashRecovery_TruncatedWAL tests recovery from a truncated WAL file.
@@ -18,36 +21,70 @@ func TestDB_CrashRecovery_TruncatedWAL(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	// Write some data
+	// Write ordered data so recovery expectations are deterministic.
 	db, err := Open(dir)
 	if err != nil {
 		t.Fatalf("failed to open db: %v", err)
 	}
 
-	testData := map[string]string{
-		"key1": "value1",
-		"key2": "value2",
-		"key3": "value3",
+	type kv struct {
+		key string
+		val string
+	}
+	testData := []kv{
+		{key: "key-001", val: "value-001"},
+		{key: "key-002", val: "value-002"},
+		{key: "key-003", val: "value-003"},
+		{key: "key-004", val: "value-004"},
+		{key: "key-005", val: "value-005"},
 	}
 
-	for k, v := range testData {
-		if err := db.Put(ctx, []byte(k), []byte(v)); err != nil {
-			t.Fatalf("failed to put %s: %v", k, err)
+	for _, item := range testData {
+		if err := db.Put(ctx, []byte(item.key), []byte(item.val)); err != nil {
+			t.Fatalf("failed to put %s: %v", item.key, err)
 		}
 	}
 
-	db.Close()
+	if err := db.Close(); err != nil {
+		t.Fatalf("failed to close db: %v", err)
+	}
 
-	// Truncate the WAL file (simulate crash mid-write)
+	// Truncate the WAL file by one byte to ensure the final record is torn.
 	walPath := filepath.Join(dir, walFileName)
 	info, err := os.Stat(walPath)
 	if err != nil {
 		t.Fatalf("failed to stat WAL: %v", err)
 	}
+	if info.Size() == 0 {
+		t.Fatal("expected non-empty WAL")
+	}
 
-	// Remove last 10 bytes (incomplete record)
-	if err := os.Truncate(walPath, info.Size()-10); err != nil {
+	if err := os.Truncate(walPath, info.Size()-1); err != nil {
 		t.Fatalf("failed to truncate WAL: %v", err)
+	}
+
+	// Pre-compute the expected repair offset from the truncated file.
+	reader, err := wal.NewReader(walPath)
+	if err != nil {
+		t.Fatalf("failed to open WAL reader: %v", err)
+	}
+	defer reader.Close()
+
+	for {
+		_, err = reader.Next()
+		if errors.Is(err, wal.ErrTruncated) {
+			break
+		}
+		if errors.Is(err, io.EOF) {
+			t.Fatal("expected truncated WAL to end with ErrTruncated")
+		}
+		if err != nil {
+			t.Fatalf("unexpected WAL read error: %v", err)
+		}
+	}
+	expectedValidOffset := reader.ValidOffset()
+	if expectedValidOffset <= 0 {
+		t.Fatalf("expected positive valid offset, got %d", expectedValidOffset)
 	}
 
 	// Reopen - should handle truncation gracefully
@@ -57,30 +94,31 @@ func TestDB_CrashRecovery_TruncatedWAL(t *testing.T) {
 	}
 	defer db2.Close()
 
-	// Verify data (may have lost the last write)
-	// We should recover at least the first 2 keys
-	recoveredCount := 0
-	for k, v := range testData {
-		got, err := db2.Get(ctx, []byte(k))
-		if errors.Is(err, ErrKeyNotFound) {
-			t.Logf("key %s not recovered (acceptable after truncation)", k)
-			continue
-		}
+	// Verify that replay physically repaired WAL to the valid offset.
+	repairedInfo, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatalf("failed to stat repaired WAL: %v", err)
+	}
+	if repairedInfo.Size() != expectedValidOffset {
+		t.Fatalf("repaired WAL size = %d, want %d", repairedInfo.Size(), expectedValidOffset)
+	}
+
+	// Verify deterministic recovery: all but the torn final write are present.
+	for i := range len(testData) - 1 {
+		got, err := db2.Get(ctx, []byte(testData[i].key))
 		if err != nil {
-			t.Errorf("unexpected error getting %s: %v", k, err)
-			continue
+			t.Fatalf("expected %s to be recovered: %v", testData[i].key, err)
 		}
-		if string(got) != v {
-			t.Errorf("key %s: expected %q, got %q", k, v, got)
+		if string(got) != testData[i].val {
+			t.Fatalf("value for %s = %q, want %q", testData[i].key, got, testData[i].val)
 		}
-		recoveredCount++
 	}
 
-	if recoveredCount == 0 {
-		t.Error("no data recovered after truncation")
+	last := testData[len(testData)-1]
+	_, err = db2.Get(ctx, []byte(last.key))
+	if !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("expected torn final write %s to be absent, got %v", last.key, err)
 	}
-
-	t.Logf("recovered %d/%d keys after WAL truncation", recoveredCount, len(testData))
 }
 
 // TestDB_CrashRecovery_CorruptedWAL tests recovery from a corrupted WAL file.
@@ -95,15 +133,11 @@ func TestDB_CrashRecovery_CorruptedWAL(t *testing.T) {
 		t.Fatalf("failed to open db: %v", err)
 	}
 
-	testData := map[string]string{
-		"key1": "value1",
-		"key2": "value2",
-		"key3": "value3",
-	}
-
-	for k, v := range testData {
-		if err := db.Put(ctx, []byte(k), []byte(v)); err != nil {
-			t.Fatalf("failed to put %s: %v", k, err)
+	for i := range 5 {
+		key := fmt.Appendf(nil, "key-%03d", i)
+		val := fmt.Appendf(nil, "value-%03d", i)
+		if err := db.Put(ctx, key, val); err != nil {
+			t.Fatalf("failed to put %s: %v", key, err)
 		}
 	}
 
@@ -127,32 +161,15 @@ func TestDB_CrashRecovery_CorruptedWAL(t *testing.T) {
 		}
 	}
 
-	// Reopen - should handle corruption gracefully
+	// Reopen - corruption should fail fast
 	db2, err := Open(dir)
-	if err != nil {
-		t.Fatalf("failed to reopen after corruption: %v", err)
+	if err == nil {
+		db2.Close()
+		t.Fatal("expected reopen after corruption to fail")
 	}
-	defer db2.Close()
-
-	// Verify data (may have lost data after corruption point)
-	recoveredCount := 0
-	for k, v := range testData {
-		got, err := db2.Get(ctx, []byte(k))
-		if errors.Is(err, ErrKeyNotFound) {
-			t.Logf("key %s not recovered (acceptable after corruption)", k)
-			continue
-		}
-		if err != nil {
-			t.Errorf("unexpected error getting %s: %v", k, err)
-			continue
-		}
-		if string(got) != v {
-			t.Errorf("key %s: expected %q, got %q", k, v, got)
-		}
-		recoveredCount++
+	if !errors.Is(err, wal.ErrChecksum) && !errors.Is(err, wal.ErrBadMagic) && !errors.Is(err, ErrCorruptBatch) {
+		t.Fatalf("expected WAL corruption error, got %v", err)
 	}
-
-	t.Logf("recovered %d/%d keys after WAL corruption", recoveredCount, len(testData))
 }
 
 // TestDB_CrashRecovery_RandomizedStress performs randomized crash-and-recover cycles.
@@ -202,7 +219,7 @@ func TestDB_CrashRecovery_RandomizedStress(t *testing.T) {
 			t.Fatalf("cycle %d: close failed: %v", cycle, err)
 		}
 
-		// Randomly corrupt or truncate the WAL (50% chance)
+		// Randomly truncate the WAL (simulate torn last record)
 		//nolint:nestif // Test code with clear logic despite nesting
 		if rng.Float64() < 0.5 {
 			walPath := filepath.Join(dir, walFileName)
@@ -211,27 +228,14 @@ func TestDB_CrashRecovery_RandomizedStress(t *testing.T) {
 				continue // WAL might not exist yet
 			}
 
-			if rng.Float64() < 0.5 {
-				// Truncate
-				truncateBy := rng.Int64N(info.Size()/4 + 1)
-				newSize := max(0, info.Size()-truncateBy)
-				os.Truncate(walPath, newSize)
-				t.Logf("cycle %d: truncated WAL by %d bytes", cycle, truncateBy)
-			} else {
-				// Corrupt
-				//nolint:gosec // G304: Test code with controlled path
-				data, _ := os.ReadFile(walPath)
-				if len(data) > 10 {
-					corruptOffset := rng.IntN(len(data) - 10)
-					data[corruptOffset] ^= 0xFF
-					os.WriteFile(walPath, data, 0644) //nolint:gosec
-					t.Logf("cycle %d: corrupted WAL at offset %d", cycle, corruptOffset)
-				}
-			}
+			truncateBy := rng.Int64N(info.Size()/4 + 1)
+			newSize := max(0, info.Size()-truncateBy)
+			os.Truncate(walPath, newSize)
+			t.Logf("cycle %d: truncated WAL by %d bytes", cycle, truncateBy)
 		}
 	}
 
-	// Final recovery - open one last time and verify
+	// Final recovery - truncated tails are ignored, so open should still succeed.
 	db, err := Open(dir)
 	if err != nil {
 		t.Fatalf("final open failed: %v", err)

@@ -22,6 +22,16 @@ type InternalKey struct {
 	Kind    byte
 }
 
+// isValidInternalKeyKind reports whether kind is supported by the current encoding.
+func isValidInternalKeyKind(kind byte) bool {
+	switch kind {
+	case InternalKeyKindPut, InternalKeyKindDelete:
+		return true
+	default:
+		return false
+	}
+}
+
 // Compare compares an internal key with another
 func (k InternalKey) Compare(other InternalKey) int {
 	cmp := bytes.Compare(k.UserKey, other.UserKey)
@@ -61,15 +71,23 @@ func (k InternalKey) Encode() []byte {
 
 // DecodeInternalKey deserializes data from byte array
 func DecodeInternalKey(data []byte) (InternalKey, error) {
+	// Validate data length
 	if len(data) < 9 {
 		return InternalKey{}, ErrCorruptInternalKey
 	}
 
 	n := len(data)
+	kind := data[n-1]
+
+	// Validate Kind byte in data
+	if !isValidInternalKeyKind(kind) {
+		return InternalKey{}, ErrCorruptInternalKey
+	}
+
 	key := InternalKey{
 		UserKey: data[:n-9],
 		Seqno:   coding.Uint64(data[n-9 : n-1]),
-		Kind:    data[n-1],
+		Kind:    kind,
 	}
 
 	return key, nil

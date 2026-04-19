@@ -27,13 +27,14 @@ func WithMemtableFlushSize(size int64) Option {
 
 // WithSSTBlockSize sets the target block size for SSTable writers.
 // Each data block will be flushed to disk once it reaches approximately
-// this many bytes. Must be > 0. Defaults to 4096 bytes.
+// this many bytes. Must be >= 0, where 0 uses the SSTable default.
 func WithSSTBlockSize(size int) Option {
 	return func(o *options) {
 		o.sstBlockSize = size
 	}
 }
 
+// applyOptions folds the supplied options onto the default configuration.
 func applyOptions(opts []Option) *options {
 	cfg := &options{
 		// Set defaults

@@ -83,12 +83,13 @@ func runOrchestrator(dbDir string, numCycles int, minDelayMs int, maxDelayMs int
 
 	for _, key := range model.Keys() {
 		_, err := db.Get(ctx, key)
-		if errors.Is(err, engine.ErrKeyNotFound) {
+		switch {
+		case errors.Is(err, engine.ErrKeyNotFound):
 			lostCount++
 			log.Printf("Key lost: %x", key)
-		} else if err != nil {
+		case err != nil:
 			log.Printf("Error reading key: %v", err)
-		} else {
+		default:
 			recoveredCount++
 		}
 	}
@@ -104,6 +105,7 @@ func runOrchestrator(dbDir string, numCycles int, minDelayMs int, maxDelayMs int
 	return nil
 }
 
+// readState reads the writer scratch file listing keys it believed were committed.
 func readState(path string) []string {
 	//nolint:gosec // G304: Path is controlled by orchestrator, not user input
 	data, err := os.ReadFile(path)

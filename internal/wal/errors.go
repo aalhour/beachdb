@@ -26,6 +26,9 @@ var (
 	// ErrUnsupportedRecordType indicates when the record type part in the header is not supported.
 	ErrUnsupportedRecordType = errors.New("beachdb/wal: unsupported record type")
 
+	// ErrRecordTooLarge indicates that a record exceeds the supported payload size.
+	ErrRecordTooLarge = errors.New("beachdb/wal: record payload too large")
+
 	// ErrWriterClosed indicates when the wal writer is closed.
 	ErrWriterClosed = errors.New("beachdb/wal: writer is closed")
 

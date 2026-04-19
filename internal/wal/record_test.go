@@ -178,17 +178,30 @@ func TestDecodeRecordHeader(t *testing.T) {
 			wantErr:        nil,
 		},
 		{
-			name: "valid header with max uint32 payload length",
+			name: "valid header with max supported payload length",
 			header: []byte{
 				0xBE, 0xAC, // magic
 				0x01,                   // version
 				0x01,                   // record type (Full)
-				0xFF, 0xFF, 0xFF, 0xFF, // payload length = max uint32
+				0x04, 0x00, 0x00, 0x00, // payload length = 64 MiB
 				0x12, 0x34, 0x56, 0x78, // checksum
 			},
-			wantPayloadLen: 0xFFFFFFFF,
+			wantPayloadLen: maxRecordPayloadSize,
 			wantChecksum:   0x12345678,
 			wantErr:        nil,
+		},
+		{
+			name: "oversized payload length is rejected",
+			header: []byte{
+				0xBE, 0xAC,
+				0x01,
+				0x01,
+				0x04, 0x00, 0x00, 0x01,
+				0x12, 0x34, 0x56, 0x78,
+			},
+			wantPayloadLen: 0,
+			wantChecksum:   0,
+			wantErr:        ErrRecordTooLarge,
 		},
 		{
 			name:           "truncated header - empty",
@@ -388,7 +401,7 @@ func TestCorruptionDetection(t *testing.T) {
 		record := EncodeRecord(payload)
 
 		// Corrupt the length field
-		record[4] ^= 0xFF
+		record[7] ^= 0xFF
 
 		payloadLen, _, err := DecodeRecordHeader(record[:recordHeaderSize])
 		if err != nil {
@@ -461,6 +474,18 @@ func TestValidateRecord(t *testing.T) {
 				t.Errorf("expected %v error but got %v instead", test.wantErr, gotErr)
 			}
 		})
+	}
+}
+
+func TestValidateRecord_EmptyPayloadChecksum(t *testing.T) {
+	emptyPayload := []byte{}
+	csum := checksum.CRC32C(emptyPayload)
+
+	if err := ValidateRecord(emptyPayload, csum); err != nil {
+		t.Fatalf("expected empty payload checksum to validate: %v", err)
+	}
+	if err := ValidateRecord(emptyPayload, csum+1); !errors.Is(err, ErrChecksum) {
+		t.Fatalf("expected checksum mismatch for empty payload, got %v", err)
 	}
 }
 

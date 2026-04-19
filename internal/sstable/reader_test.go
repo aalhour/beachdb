@@ -930,7 +930,7 @@ func TestReader_TruncatedFile(t *testing.T) {
 	// Keep only half the data block bytes + the full footer
 	halfData := len(data)/2 - int(footerSize)
 	halfData = max(halfData, 1)
-	truncated := append(data[:halfData], ft...)
+	truncated := append(append([]byte(nil), data[:halfData]...), ft...)
 	if err := os.WriteFile(path, truncated, 0o600); err != nil { //nolint:gosec // test with temp dir
 		t.Fatal(err)
 	}

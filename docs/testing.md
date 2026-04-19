@@ -42,7 +42,8 @@ for representative examples.
 
 1. Writing data, closing the DB normally, then truncating or corrupting the
    WAL file before reopening.
-2. Verifying that committed data survives and incomplete writes are skipped.
+2. Verifying that committed data survives, incomplete writes are skipped, and
+   corrupted WALs fail fast.
 3. Running randomised write-crash-reopen cycles to exercise recovery under
    varied conditions.
 
