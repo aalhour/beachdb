@@ -1,44 +1,35 @@
-// Package main provides the crash utility for testing database durability
-// under SIGKILL conditions. It spawns writer subprocesses and kills them
-// randomly to verify that acknowledged writes survive crashes.
+// Package main provides a controller/worker crash harness for exercising
+// BeachDB durability under process crashes and injected engine fault points.
 package main
 
 import (
 	"flag"
 	"fmt"
+	"io"
+	"log"
 	"os"
 )
 
-var (
-	mode       = flag.String("mode", "orchestrator", "Mode: orchestrator or writer")
-	dbDir      = flag.String("dbdir", "", "Database directory")
-	stateFile  = flag.String("state", "", "State file path (writer mode)")
-	numCycles  = flag.Int("cycles", 50, "Number of crash cycles (orchestrator mode)")
-	minDelayMs = flag.Int("min-delay", 10, "Minimum delay before kill (ms)")
-	maxDelayMs = flag.Int("max-delay", 100, "Maximum delay before kill (ms)")
-)
-
+// main dispatches crash harness subcommands and reports user-facing errors.
 func main() {
-	flag.Parse()
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	if *dbDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: --dbdir required\n")
-		flag.Usage()
+	if len(os.Args) < 2 {
+		printUsage(os.Stderr)
 		os.Exit(1)
 	}
 
 	var err error
-	switch *mode {
-	case "writer":
-		if *stateFile == "" {
-			fmt.Fprintf(os.Stderr, "Error: --state required in writer mode\n")
-			os.Exit(1)
-		}
-		err = runWriter(*dbDir, *stateFile)
-	case "orchestrator":
-		err = runOrchestrator(*dbDir, *numCycles, *minDelayMs, *maxDelayMs)
+	switch os.Args[1] {
+	case "run":
+		err = runCommand(os.Args[2:])
+	case "replay":
+		err = replayCommand(os.Args[2:])
+	case "worker":
+		err = workerCommand(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown mode %q\n", *mode)
+		fmt.Fprintf(os.Stderr, "Error: unknown subcommand %q\n\n", os.Args[1])
+		printUsage(os.Stderr)
 		os.Exit(1)
 	}
 
@@ -46,4 +37,24 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// printUsage renders the crash harness subcommand help.
+func printUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  crash run [flags]")
+	fmt.Fprintln(w, "  crash replay --artifact=FILE [--dbdir=DIR]")
+	fmt.Fprintln(w, "  crash worker --dbdir=DIR")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Subcommands:")
+	fmt.Fprintln(w, "  run     Execute a controller-driven crash harness run")
+	fmt.Fprintln(w, "  replay  Replay a recorded artifact deterministically")
+	fmt.Fprintln(w, "  worker  Internal worker subprocess used by run/replay")
+}
+
+// newFlagSet constructs a crash subcommand flag set with consistent behavior.
+func newFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	return fs
 }

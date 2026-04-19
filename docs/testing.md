@@ -38,6 +38,15 @@ for representative examples.
 
 ## Crash and recovery tests
 
+BeachDB now has two layers of crash testing:
+
+1. `engine/crash_test.go` and related engine tests cover recovery from torn or
+   corrupted WAL files directly.
+2. `cmd/crash` provides a controller/worker crash harness that exercises the
+   public DB API through a subprocess boundary.
+
+### Engine-level recovery tests
+
 `engine/crash_test.go` simulates mid-write crashes by:
 
 1. Writing data, closing the DB normally, then truncating or corrupting the
@@ -49,6 +58,23 @@ for representative examples.
 
 These tests rely on `t.TempDir()` for isolation — each test gets its own
 database directory.
+
+### Harness-level crash tests
+
+`cmd/crash` is a greenfield controller/worker crash harness:
+
+1. The controller pre-generates a deterministic workload from a seed.
+2. The worker receives one operation at a time over a binary-safe NDJSON
+   protocol on stdin/stdout.
+3. The worker emits `ready`, `start`, `ack`, and `fail` lifecycle events.
+4. After every kill or injected crash, the controller reopens the DB and
+   verifies that state matches all acknowledged operations, with at most one
+   in-flight idempotent operation treated as indeterminate.
+5. Each run writes a replayable artifact JSON containing workload, events,
+   cycle metadata, and any verification failure.
+
+Use `make crash-check` for a short deterministic smoke run. Local deeper runs
+can use `./bin/crash run ...` and `./bin/crash replay ...`.
 
 ---
 
@@ -168,19 +194,27 @@ func TestBlockBuilder_Reset_NoAllocs(t *testing.T) {
 
 ---
 
-## Fault injection **(TODO)**
+## Fault injection
 
-Planned approach: wrap `os.File` with an interface that can inject errors at
-controlled points — `EIO` on write, short reads, `ENOSPC` on sync.
+BeachDB has an internal-only phase-2 crash/fault hook layer in
+`internal/crashhook`.
 
-Targets:
+Currently supported crash points:
 
-- WAL writer: error mid-record, error on sync, error on close.
-- SSTable writer: error during block flush, error writing footer.
-- SSTable reader: corrupt block checksum, truncated index, missing footer.
-- DB open/recovery: WAL present but unreadable, partial WAL replay.
+- `wal_after_append`
+- `wal_after_sync`
+- `flush_after_file_sync`
+- `flush_after_publish`
 
-Implementation will live in `internal/testutil/faultfs.go` or similar.
+Currently supported fault points:
+
+- `wal_sync_error`
+- `sst_write_error`
+- `sst_publish_error`
+
+These hooks are activated only by environment variables that `cmd/crash`
+passes to the worker subprocess, and engine tests also exercise them directly
+through subprocess helpers and injected error assertions.
 
 ---
 
@@ -194,8 +228,8 @@ Planned workloads:
   iterate, verify snapshot consistency.
 - **Large dataset** — millions of keys to exercise block splitting, multi-level
   index, and memory pressure.
-- **Crash loop** — repeated open/write/kill/recover cycles (extension of
-  existing crash tests to longer durations and randomised timing).
+- **Crash loop** — repeated open/write/kill/recover cycles using the
+  controller/worker harness for longer durations and richer workloads.
 
 These will use the reference model (`testutil.Model`) to verify correctness
 under load.

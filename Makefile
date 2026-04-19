@@ -1,4 +1,4 @@
-.PHONY: all build test coverage lint fmt-check fmt clean check examples crash-test help
+.PHONY: all build test coverage lint fmt-check fmt clean check examples crash-check help
 
 CYCLES ?= 100
 
@@ -48,25 +48,25 @@ fmt:
 ## check: Runs fmt-check, lint and test
 check: fmt-check lint test
 
-## crash-test: Run crash harness in writer+orchestrator modes ($(CYCLES) cycles) using /tmp workspace
-crash-test:
+## crash-check: Run the controller/worker crash harness ($(CYCLES) cycles) with a temporary workspace
+crash-check:
 	@set -eu; \
 	tmpdir=$$(mktemp -d /tmp/beachdb-crash.XXXXXX); \
-	trap 'rm -rf "$$tmpdir"' EXIT INT TERM; \
-	writer_db="$$tmpdir/writer-db"; \
-	orchestrator_db="$$tmpdir/orchestrator-db"; \
-	mkdir -p "$$writer_db" "$$orchestrator_db"; \
-	echo "Running writer mode crash loop ($(CYCLES) cycles) in $$writer_db"; \
-	for cycle in $$(seq 1 $(CYCLES)); do \
-		state_file="$$tmpdir/writer-state-$$cycle.txt"; \
-		go run ./cmd/crash --mode=writer --dbdir="$$writer_db" --state="$$state_file" >/dev/null 2>&1 & \
-		pid=$$!; \
-		sleep 0.05; \
-		kill -9 $$pid >/dev/null 2>&1 || true; \
-		wait $$pid >/dev/null 2>&1 || true; \
-	done; \
-	echo "Running orchestrator mode crash loop ($(CYCLES) cycles) in $$orchestrator_db"; \
-	go run ./cmd/crash --mode=orchestrator --dbdir="$$orchestrator_db" --cycles=$(CYCLES)
+	dbdir="$$tmpdir/db"; \
+	artdir="$$tmpdir/artifacts"; \
+	echo "Running crash harness ($(CYCLES) cycles) in $$dbdir"; \
+	echo ""; \
+	go run ./cmd/crash run \
+		--dbdir="$$dbdir" \
+		--artifact-dir="$$artdir" \
+		--cycles=$(CYCLES) \
+		--seed=777 \
+		--ops=64 \
+		--min-delay-ms=10 \
+		--max-delay-ms=30 \
+		--verify-every-cycle=true; \
+	echo ""; \
+	echo "Crash run data kept in "$$tmpdir". Delete it when done: 'rm -rf $$tmpdir'";
 
 ## clean: Remove build artifacts and test output
 clean:
