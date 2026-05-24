@@ -1,6 +1,18 @@
-.PHONY: all build test coverage lint fmt-check fmt clean check examples crash-check help
+.PHONY: all build test coverage lint fmt-check fmt clean check examples crash-check bench fuzz help
 
 CYCLES ?= 100
+
+# Bench knobs. Override on the CLI: `make bench PKG=./internal/wal BENCH=BenchmarkX BENCHTIME=3s`
+PKG ?= ./...
+BENCH ?= .
+BENCHTIME ?= 1s
+
+# Fuzz knobs. By default `make fuzz` discovers every Fuzz* function across the
+# tree and runs each for FUZZTIME. -fuzz only accepts one target at a time
+# (and one package), so the target loops rather than passes `./...`.
+FUZZPKG ?= ./...
+FUZZ ?= ^Fuzz
+FUZZTIME ?= 30s
 
 # Default target
 all: build
@@ -47,6 +59,21 @@ fmt:
 
 ## check: Runs fmt-check, lint and test
 check: fmt-check lint test
+
+## bench: Run benchmarks project-wide. Override with `make bench PKG=./internal/wal BENCH=BenchmarkX BENCHTIME=3s`
+bench:
+	go test -run=^$$ -bench=$(BENCH) -benchmem -benchtime=$(BENCHTIME) $(PKG)
+
+## fuzz: Run every fuzz target FUZZTIME each across FUZZPKG (default ./..., 30s each). `make fuzz FUZZTIME=1m`
+fuzz:
+	@set -eu; \
+	for pkg in $$(go list $(FUZZPKG)); do \
+		targets=$$(go test -list '$(FUZZ)' $$pkg 2>/dev/null | grep -E '^Fuzz' || true); \
+		for t in $$targets; do \
+			echo "==> $$pkg :: $$t ($(FUZZTIME))"; \
+			go test -run=^$$ -fuzz="^$$t$$" -fuzztime=$(FUZZTIME) $$pkg; \
+		done; \
+	done
 
 ## crash-check: Run the controller/worker crash harness ($(CYCLES) cycles) with a temporary workspace
 crash-check:
