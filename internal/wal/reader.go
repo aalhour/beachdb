@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"sync"
+
+	"github.com/aalhour/beachdb/internal/record"
 )
 
 // Reader provides sequential read access to WAL records.
@@ -43,7 +45,7 @@ func (r *Reader) Next() (payload []byte, err error) {
 		return nil, ErrReaderClosed
 	}
 
-	header := make([]byte, recordHeaderSize)
+	header := make([]byte, record.HeaderSize)
 	n, err := io.ReadFull(r.buf, header)
 
 	// Handle EOF and truncation cases
@@ -51,7 +53,7 @@ func (r *Reader) Next() (payload []byte, err error) {
 		// Clean EOF: no more records
 		return nil, io.EOF
 	}
-	if errors.Is(err, io.ErrUnexpectedEOF) || n < recordHeaderSize {
+	if errors.Is(err, io.ErrUnexpectedEOF) || n < record.HeaderSize {
 		// Partial read: truncated header
 		return nil, ErrTruncated
 	}
@@ -84,7 +86,7 @@ func (r *Reader) Next() (payload []byte, err error) {
 		return nil, err
 	}
 
-	r.pos += int64(recordHeaderSize) + int64(payloadLen)
+	r.pos += int64(record.HeaderSize) + int64(payloadLen)
 
 	return payload, nil
 }
