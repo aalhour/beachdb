@@ -62,7 +62,7 @@ func TestEncodeRecord_TooLarge(t *testing.T) {
 	// Construct a payload one byte larger than the WAL format's cap.
 	payload := make([]byte, int(maxRecordPayloadSize)+1)
 	_, err := EncodeRecord(payload)
-	if !errors.Is(err, ErrRecordTooLarge) {
+	if !errors.Is(err, record.ErrRecordTooLarge) {
 		t.Errorf("expected ErrRecordTooLarge, got %v", err)
 	}
 }
@@ -106,7 +106,7 @@ func TestValidateRecord(t *testing.T) {
 
 	corrupted := append([]byte(nil), payload...)
 	corrupted[0] ^= 0xFF
-	if err := ValidateRecord(corrupted, crc); !errors.Is(err, ErrChecksum) {
+	if err := ValidateRecord(corrupted, crc); !errors.Is(err, record.ErrChecksum) {
 		t.Errorf("expected ErrChecksum on corrupted payload, got %v", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/aalhour/beachdb/engine"
+	"github.com/aalhour/beachdb/internal/record"
 	"github.com/aalhour/beachdb/internal/wal"
 )
 
@@ -56,14 +57,14 @@ func dumpWAL(path string) error {
 			break
 		}
 
-		if errors.Is(err, wal.ErrTruncated) {
+		if errors.Is(err, record.ErrTruncated) {
 			// Incomplete record (crash mid-write)
 			fmt.Printf("Record %d: truncated (incomplete write)\n", recordCount)
 			incomplete++
 			break
 		}
 
-		if errors.Is(err, wal.ErrChecksum) {
+		if errors.Is(err, record.ErrChecksum) {
 			// Corrupted record
 			fmt.Printf("Record %d: CORRUPTED (checksum mismatch)\n", recordCount)
 			incomplete++

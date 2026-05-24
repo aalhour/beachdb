@@ -8,6 +8,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/aalhour/beachdb/internal/record"
 	"github.com/aalhour/beachdb/internal/util/checksum"
 )
 
@@ -509,7 +510,7 @@ func TestReader_Next(t *testing.T) {
 		defer r.Close()
 
 		_, err := r.Next()
-		if !errors.Is(err, ErrTruncated) {
+		if !errors.Is(err, record.ErrTruncated) {
 			t.Errorf("expected ErrTruncated, got %v", err)
 		}
 	})
@@ -528,7 +529,7 @@ func TestReader_Next(t *testing.T) {
 		defer r.Close()
 
 		_, err := r.Next()
-		if !errors.Is(err, ErrBadMagic) {
+		if !errors.Is(err, record.ErrBadMagic) {
 			t.Errorf("expected ErrBadMagic, got %v", err)
 		}
 	})
@@ -544,7 +545,7 @@ func TestReader_Next(t *testing.T) {
 		defer r.Close()
 
 		_, err := r.Next()
-		if !errors.Is(err, ErrUnsupportedVersion) {
+		if !errors.Is(err, record.ErrUnsupportedVersion) {
 			t.Errorf("expected ErrUnsupportedVersion, got %v", err)
 		}
 	})
@@ -562,7 +563,7 @@ func TestReader_Next(t *testing.T) {
 		defer r.Close()
 
 		_, err := r.Next()
-		if !errors.Is(err, ErrRecordTooLarge) {
+		if !errors.Is(err, record.ErrRecordTooLarge) {
 			t.Errorf("expected ErrRecordTooLarge, got %v", err)
 		}
 	})
@@ -588,7 +589,7 @@ func TestReader_Next(t *testing.T) {
 		defer r.Close()
 
 		_, err := r.Next()
-		if !errors.Is(err, ErrChecksum) {
+		if !errors.Is(err, record.ErrChecksum) {
 			t.Errorf("expected ErrChecksum, got %v", err)
 		}
 	})
@@ -724,7 +725,7 @@ func TestReader_Next_EdgeCases(t *testing.T) {
 		defer r.Close()
 
 		_, err := r.Next()
-		if !errors.Is(err, ErrUnsupportedRecordType) {
+		if !errors.Is(err, record.ErrUnsupportedRecordType) {
 			t.Errorf("expected ErrUnsupportedRecordType, got %v", err)
 		}
 	})
@@ -827,16 +828,16 @@ func TestReader_Next_ManualRecordConstruction(t *testing.T) {
 		// Manually construct with wrong checksum
 		//nolint:gosec // G115: test data, length is small
 		header := buildTestRecordHeader(validMagicBytes(), walVersion, RecordTypeFull, uint32(len(payload)), 0xDEADBEEF)
-		record := append(append([]byte(nil), header...), payload...)
+		rec := append(append([]byte(nil), header...), payload...)
 
 		//nolint:gosec // G306: 0644 is acceptable for test files
-		os.WriteFile(path, record, 0644)
+		os.WriteFile(path, rec, 0644)
 
 		r, _ := NewReader(path)
 		defer r.Close()
 
 		_, err := r.Next()
-		if !errors.Is(err, ErrChecksum) {
+		if !errors.Is(err, record.ErrChecksum) {
 			t.Errorf("expected ErrChecksum, got %v", err)
 		}
 	})
@@ -848,10 +849,10 @@ func TestReader_Next_ManualRecordConstruction(t *testing.T) {
 
 		//nolint:gosec // G115: test data, length is small
 		header := buildTestRecordHeader(validMagicBytes(), walVersion, RecordTypeFull, uint32(len(payload)), csum)
-		record := append(append([]byte(nil), header...), payload...)
+		rec := append(append([]byte(nil), header...), payload...)
 
 		//nolint:gosec // G306: 0644 is acceptable for test files
-		os.WriteFile(path, record, 0644)
+		os.WriteFile(path, rec, 0644)
 
 		r, _ := NewReader(path)
 		defer r.Close()
@@ -961,7 +962,7 @@ func TestReader_ValidOffsetDoesNotAdvanceOnCorruptionOrTruncation(t *testing.T) 
 		validAfterFirst := r.ValidOffset()
 
 		_, err = r.Next()
-		if !errors.Is(err, ErrChecksum) {
+		if !errors.Is(err, record.ErrChecksum) {
 			t.Fatalf("expected ErrChecksum, got %v", err)
 		}
 		if got := r.ValidOffset(); got != validAfterFirst {
@@ -1009,7 +1010,7 @@ func TestReader_ValidOffsetDoesNotAdvanceOnCorruptionOrTruncation(t *testing.T) 
 		validAfterFirst := r.ValidOffset()
 
 		_, err = r.Next()
-		if !errors.Is(err, ErrTruncated) {
+		if !errors.Is(err, record.ErrTruncated) {
 			t.Fatalf("expected ErrTruncated, got %v", err)
 		}
 		if got := r.ValidOffset(); got != validAfterFirst {

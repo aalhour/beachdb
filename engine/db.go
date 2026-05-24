@@ -15,6 +15,7 @@ import (
 	"github.com/aalhour/beachdb/internal/crashhook"
 	"github.com/aalhour/beachdb/internal/keys"
 	"github.com/aalhour/beachdb/internal/memtable"
+	"github.com/aalhour/beachdb/internal/record"
 	"github.com/aalhour/beachdb/internal/sstable"
 	"github.com/aalhour/beachdb/internal/wal"
 )
@@ -492,7 +493,7 @@ func replayWAL(db *DB, walFilePath string) error {
 			// Clean end
 			// TODO: Log it as info
 			return nil
-		case errors.Is(err, wal.ErrTruncated):
+		case errors.Is(err, record.ErrTruncated):
 			// Incomplete write before crash, skip it
 			// TODO: Log it as info
 			if err := os.Truncate(walFilePath, reader.ValidOffset()); err != nil {
