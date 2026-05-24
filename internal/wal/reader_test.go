@@ -801,7 +801,10 @@ func TestReader_Next_ManualRecordConstruction(t *testing.T) {
 	t.Run("valid manually constructed record", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "manual.wal")
 		payload := []byte("test")
-		record := EncodeRecord(payload)
+		record, err := EncodeRecord(payload)
+		if err != nil {
+			t.Fatalf("EncodeRecord failed: %v", err)
+		}
 		//nolint:gosec // G306: 0644 is acceptable for test files
 		os.WriteFile(path, record, 0644)
 

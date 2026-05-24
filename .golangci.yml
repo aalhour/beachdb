@@ -145,6 +145,12 @@ linters:
         - .WithStack(
       ignore-package-globs:
         - encoding/*
+        # The record package is BeachDB's shared framing primitive. Its errors
+        # (ErrChecksum, ErrBadMagic, ErrTruncated, ...) are stable sentinels
+        # already namespaced as "beachdb/record:". WAL and manifest re-export
+        # them as aliases, so wrapping at the shim boundary would duplicate
+        # the namespace prefix and break errors.Is for callers.
+        - github.com/aalhour/beachdb/internal/record
 
     # Misspell settings
     misspell:

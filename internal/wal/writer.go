@@ -33,12 +33,12 @@ func NewWriter(path string) (*Writer, error) {
 
 // Append writes a new WAL record containing the given payload.
 func (w *Writer) Append(payload []byte) error {
-	if len(payload) > maxRecordPayloadSize {
-		return ErrRecordTooLarge
+	// First, encode the payload outside the lock.
+	// Encode performs the size check against the format's MaxPayloadSize.
+	record, err := EncodeRecord(payload)
+	if err != nil {
+		return err
 	}
-
-	// First, encode the payload outside the lock
-	record := EncodeRecord(payload)
 
 	// Second, acquire the lock to synchronize buffer writing
 	w.mu.Lock()
@@ -49,7 +49,7 @@ func (w *Writer) Append(payload []byte) error {
 	}
 
 	// Write to the buffer inside the lock
-	_, err := w.buf.Write(record)
+	_, err = w.buf.Write(record)
 	if err != nil {
 		return fmt.Errorf("wal: failed to write record: %w", err)
 	}
