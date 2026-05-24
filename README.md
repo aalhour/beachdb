@@ -32,8 +32,8 @@ BeachDB is my attempt to re-learn the fundamentals by building them from scratch
 - [x] **Reference-model randomized tests** (model vs implementation)
 - [x] **SSTables v1**: immutable sorted files + `sst_dump`, see: [sstables blog post](https://aalhour.com/posts/beachdb-sstables-v1/)
 - [x] **Crash-loop harness**: kill mid-write, reopen, validate invariants, see: [crash-testing, part 1](https://aalhour.com/posts/beachdb-crash-testing-part1/) blog post
-- [ ] **Merge iterators** (memtable + SSTs) + **snapshot reads** (seqno-based)
 - [ ] **Manifest/versioning** + `manifest_dump` (startup reconstruction)
+- [ ] **Merge iterators** (memtable + SSTs) + **snapshot reads** (seqno-based)
 - [ ] **Read path acceleration**: block index + bloom filters + benchmark evidence
 - [ ] **Compaction v1**: one strategy, minimal knobs + amplification measurements
 - [ ] **Adversarial testing**: fault injection + fuzzing (WAL/SST decode paths)

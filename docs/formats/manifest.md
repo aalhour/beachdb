@@ -41,7 +41,7 @@ A MANIFEST file is a sequence of records. The framing is the same as the [WAL re
 
 | Field | WAL value | Manifest value |
 |-------|-----------|----------------|
-| `magic` | `0xBEAC` | `0x4D46` (ASCII `"MF"`) |
+| `magic` | 8-byte ASCII `BEACHWAL` | 8-byte ASCII `BEACHMAN` |
 | `version` | `0x01` | `0x01` |
 | `type` | `0x01` (Full) | `0x01` (Full) |
 | `length` | uint32 | uint32 |
