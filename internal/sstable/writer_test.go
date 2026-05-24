@@ -542,28 +542,28 @@ func TestWriter_FooterLayout(t *testing.T) {
 	data := readFileBytes(t, path)
 	ft := data[len(data)-int(footerSize):]
 
-	// Verify magic (bytes 0-7)
-	magic := string(ft[0:8])
+	// Verify magic
+	magic := string(ft[sstMagicOffset : sstMagicOffset+sstMagicSize])
 	if magic != sstMagic {
 		t.Fatalf("magic: want %q, got %q", sstMagic, magic)
 	}
 
-	// Verify version (bytes 8-11)
-	version := coding.Uint32(ft[8:])
+	// Verify version
+	version := coding.Uint32(ft[sstVersionOffset : sstVersionOffset+sstVersionSize])
 	if version != sstVersion {
 		t.Fatalf("version: want %d, got %d", sstVersion, version)
 	}
 
-	// Verify checksum (bytes 36-39 cover bytes 0-35)
-	storedCRC := coding.Uint32(ft[36:])
-	computedCRC := checksum.CRC32C(ft[:36])
+	// Verify checksum covers everything before the checksum field
+	storedCRC := coding.Uint32(ft[sstChecksumOffset : sstChecksumOffset+checksumSize])
+	computedCRC := checksum.CRC32C(ft[:sstChecksumInputSize])
 	if storedCRC != computedCRC {
 		t.Fatalf("footer checksum mismatch: stored=0x%08x computed=0x%08x", storedCRC, computedCRC)
 	}
 
 	// Verify index offset + size are within file bounds
-	indexOffset := coding.Uint64(ft[12:])
-	indexSize := coding.Uint32(ft[20:])
+	indexOffset := coding.Uint64(ft[sstIndexOffsetOffset : sstIndexOffsetOffset+sstIndexOffsetSize])
+	indexSize := coding.Uint32(ft[sstIndexSizeOffset : sstIndexSizeOffset+sstIndexSizeSize])
 	if indexOffset+uint64(indexSize) > uint64(len(data))-uint64(footerSize) {
 		t.Fatal("index block extends past the footer")
 	}

@@ -14,10 +14,32 @@ import (
 )
 
 const (
-	footerSize   uint32 = 40
-	sstMagic     string = "BEACHSST"
-	sstVersion   uint32 = 1
-	checksumSize uint32 = 4
+	sstMagic   string = "BEACHSST"
+	sstVersion uint32 = 1
+
+	// Field sizes (in bytes).
+	sstMagicSize          uint32 = 8
+	sstVersionSize        uint32 = 4
+	sstIndexOffsetSize    uint32 = 8
+	sstIndexSizeSize      uint32 = 4
+	sstDataBlockCountSize uint32 = 4
+	sstEntryCountSize     uint32 = 8
+	checksumSize          uint32 = 4
+
+	// Field offsets within the footer.
+	sstMagicOffset          uint32 = 0
+	sstVersionOffset        uint32 = sstMagicOffset + sstMagicSize
+	sstIndexOffsetOffset    uint32 = sstVersionOffset + sstVersionSize
+	sstIndexSizeOffset      uint32 = sstIndexOffsetOffset + sstIndexOffsetSize
+	sstDataBlockCountOffset uint32 = sstIndexSizeOffset + sstIndexSizeSize
+	sstEntryCountOffset     uint32 = sstDataBlockCountOffset + sstDataBlockCountSize
+	sstChecksumOffset       uint32 = sstEntryCountOffset + sstEntryCountSize
+
+	// sstChecksumInputSize is the number of leading bytes covered by the footer checksum.
+	sstChecksumInputSize uint32 = sstChecksumOffset
+
+	// footerSize is the on-disk size of the footer in bytes.
+	footerSize uint32 = sstChecksumOffset + checksumSize
 )
 
 // footer defines the values inside the footer block
@@ -28,6 +50,7 @@ type footer struct {
 	entryCount     uint64 // How many entries are in this file
 }
 
+// newFooter constructs a footer from the given field values.
 func newFooter(indexOffset uint64, indexSize uint32, dataBlockCount uint32, entryCount uint64) *footer {
 	return &footer{
 		indexOffset:    indexOffset,
@@ -37,67 +60,51 @@ func newFooter(indexOffset uint64, indexSize uint32, dataBlockCount uint32, entr
 	}
 }
 
-// Encode encodes a footer struct, computes its checksum and
-// returns a final byte array with all parts
+// encode encodes a footer struct, computes its checksum and
+// returns a final byte array with all parts.
 func (f *footer) encode() []byte {
-	// Footer format
-	// [magic:8][version:4][indexOffset:8][indexSize:4][dataBlockCount:4][entryCount:8][checksum:4]
-
 	buf := make([]byte, footerSize)
 
-	// Write all the fields to buffer
-	offset := 0
-	copy(buf[offset:], []byte(sstMagic))
-	offset += 8
-	coding.PutUint32(buf[offset:], sstVersion)
-	offset += 4
-	coding.PutUint64(buf[offset:], f.indexOffset)
-	offset += 8
-	coding.PutUint32(buf[offset:], f.indexSize)
-	offset += 4
-	coding.PutUint32(buf[offset:], f.dataBlockCount)
-	offset += 4
-	coding.PutUint64(buf[offset:], f.entryCount)
-	offset += 8
+	copy(buf[sstMagicOffset:sstMagicOffset+sstMagicSize], []byte(sstMagic))
+	coding.PutUint32(buf[sstVersionOffset:sstVersionOffset+sstVersionSize], sstVersion)
+	coding.PutUint64(buf[sstIndexOffsetOffset:sstIndexOffsetOffset+sstIndexOffsetSize], f.indexOffset)
+	coding.PutUint32(buf[sstIndexSizeOffset:sstIndexSizeOffset+sstIndexSizeSize], f.indexSize)
+	coding.PutUint32(buf[sstDataBlockCountOffset:sstDataBlockCountOffset+sstDataBlockCountSize], f.dataBlockCount)
+	coding.PutUint64(buf[sstEntryCountOffset:sstEntryCountOffset+sstEntryCountSize], f.entryCount)
 
-	// Calculate the checksum of buffer and append it at the end
-	crc32 := checksum.CRC32C(buf[:offset])
-	coding.PutUint32(buf[offset:], crc32)
+	crc32 := checksum.CRC32C(buf[:sstChecksumInputSize])
+	coding.PutUint32(buf[sstChecksumOffset:sstChecksumOffset+checksumSize], crc32)
 
 	return buf
 }
 
-// DecodeFooter takes raw footer data byte and decodes it into
-// a footer struct and verifies its magic, version and checksum parts
+// decodeFooter takes raw footer data bytes and decodes them into
+// a footer struct, verifying magic, version, and checksum.
 func decodeFooter(data []byte) (footer, error) {
 	if len(data) != int(footerSize) {
 		return footer{}, ErrCorruptFooter
 	}
 
-	// Verify magic
-	if string(data[0:8]) != sstMagic {
+	if string(data[sstMagicOffset:sstMagicOffset+sstMagicSize]) != sstMagic {
 		return footer{}, ErrBadMagic
 	}
 
-	// Verify version
-	version := coding.Uint32(data[8:])
+	version := coding.Uint32(data[sstVersionOffset : sstVersionOffset+sstVersionSize])
 	if version != sstVersion {
 		return footer{}, ErrUnsupportedVersion
 	}
 
-	// Verify checksum: CRC32C of bytes [0:36] must match bytes [36:40]
-	stored := coding.Uint32(data[36:])
-	computed := checksum.CRC32C(data[:36])
+	stored := coding.Uint32(data[sstChecksumOffset : sstChecksumOffset+checksumSize])
+	computed := checksum.CRC32C(data[:sstChecksumInputSize])
 	if stored != computed {
 		return footer{}, ErrCorruptFooter
 	}
 
-	// Parse fields
 	f := footer{
-		indexOffset:    coding.Uint64(data[12:]),
-		indexSize:      coding.Uint32(data[20:]),
-		dataBlockCount: coding.Uint32(data[24:]),
-		entryCount:     coding.Uint64(data[28:]),
+		indexOffset:    coding.Uint64(data[sstIndexOffsetOffset : sstIndexOffsetOffset+sstIndexOffsetSize]),
+		indexSize:      coding.Uint32(data[sstIndexSizeOffset : sstIndexSizeOffset+sstIndexSizeSize]),
+		dataBlockCount: coding.Uint32(data[sstDataBlockCountOffset : sstDataBlockCountOffset+sstDataBlockCountSize]),
+		entryCount:     coding.Uint64(data[sstEntryCountOffset : sstEntryCountOffset+sstEntryCountSize]),
 	}
 
 	return f, nil

@@ -118,7 +118,7 @@ func TestReader_BadMagic(t *testing.T) {
 	}
 
 	footerStart := len(data) - int(footerSize)
-	data[footerStart] = 0xFF // corrupt magic
+	data[footerStart+int(sstMagicOffset)] = 0xFF // corrupt magic
 
 	if err := os.WriteFile(path, data, 0o600); err != nil { //nolint:gosec // test with temp dir
 		t.Fatal(err)
@@ -147,14 +147,15 @@ func TestReader_BadVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Version is at offset 8 within the footer (4 bytes, after 8-byte magic)
+	// Version sits right after the magic inside the footer.
 	footerStart := len(data) - int(footerSize)
-	versionOffset := footerStart + 8
+	versionOffset := footerStart + int(sstVersionOffset)
+	checksumOffset := footerStart + int(sstChecksumOffset)
 
-	// Write an unsupported version and recompute the footer checksum
-	coding.PutUint32(data[versionOffset:], 99)
-	crc := checksum.CRC32C(data[footerStart : footerStart+36])
-	coding.PutUint32(data[footerStart+36:], crc)
+	// Write an unsupported version and recompute the footer checksum.
+	coding.PutUint32(data[versionOffset:versionOffset+int(sstVersionSize)], 99)
+	crc := checksum.CRC32C(data[footerStart : footerStart+int(sstChecksumInputSize)])
+	coding.PutUint32(data[checksumOffset:checksumOffset+int(checksumSize)], crc)
 
 	if err := os.WriteFile(path, data, 0o600); err != nil { //nolint:gosec // test with temp dir
 		t.Fatal(err)
@@ -183,9 +184,9 @@ func TestReader_BadFooterChecksum(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Flip a byte in the footer body (not magic or checksum) to trigger checksum mismatch
+	// Flip a byte inside the index-size field (covered by the footer checksum, not magic or checksum itself).
 	footerStart := len(data) - int(footerSize)
-	data[footerStart+20] ^= 0xFF
+	data[footerStart+int(sstIndexSizeOffset)] ^= 0xFF
 
 	if err := os.WriteFile(path, data, 0o600); err != nil { //nolint:gosec // test with temp dir
 		t.Fatal(err)
