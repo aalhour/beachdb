@@ -2,7 +2,7 @@ package manifest
 
 // Version represents an in-memory snapshot of which SSTables exist.
 type Version struct {
-	files [][]FileMetadata // files[level] = sorted list of files at that level
+	_ [][]FileMetadata // files[level] = sorted list of files at that level (TODO: scaffolding for upcoming work)
 }
 
 // NewVersion returns a new Version.
@@ -11,12 +11,12 @@ func NewVersion() *Version {
 }
 
 // Apply applies a single atomic version edit to the current Version.
-func (v *Version) Apply(edit *VersionEdit) *Version {
+func (v *Version) Apply(_ *VersionEdit) *Version {
 	return &Version{}
 }
 
 // Files returns the list of files at a given level.
-func (v *Version) Files(level int) []FileMetadata {
+func (v *Version) Files(_ int) []FileMetadata {
 	return nil
 }
 

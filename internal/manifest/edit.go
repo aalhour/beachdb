@@ -16,7 +16,7 @@ type VersionEdit struct {
 	AddedFiles   []FileMetadata
 	DeletedFiles []struct {
 		Level  int
-		FileId uint64
+		FileID uint64
 	}
 	HasNextFileID bool
 	NextFileID    uint64 // Next SSTable file number
@@ -34,6 +34,6 @@ func (e *VersionEdit) Encode() []byte {
 
 // DecodeVersionEdit decodes a byte slice into a VersionEdit.
 // Returns an error if the data is malformed, truncated, or contains invalid operations.
-func DecodeVersionEdit(data []byte) (*VersionEdit, error) {
+func DecodeVersionEdit(_ []byte) (*VersionEdit, error) {
 	return &VersionEdit{}, nil
 }
