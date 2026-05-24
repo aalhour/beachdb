@@ -11,6 +11,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/aalhour/beachdb/internal/record"
 	"github.com/aalhour/beachdb/internal/testutil"
 	"github.com/aalhour/beachdb/internal/wal"
 )
@@ -72,7 +73,7 @@ func TestDB_CrashRecovery_TruncatedWAL(t *testing.T) {
 
 	for {
 		_, err = reader.Next()
-		if errors.Is(err, wal.ErrTruncated) {
+		if errors.Is(err, record.ErrTruncated) {
 			break
 		}
 		if errors.Is(err, io.EOF) {
@@ -167,7 +168,7 @@ func TestDB_CrashRecovery_CorruptedWAL(t *testing.T) {
 		db2.Close()
 		t.Fatal("expected reopen after corruption to fail")
 	}
-	if !errors.Is(err, wal.ErrChecksum) && !errors.Is(err, wal.ErrBadMagic) && !errors.Is(err, ErrCorruptBatch) {
+	if !errors.Is(err, record.ErrChecksum) && !errors.Is(err, record.ErrBadMagic) && !errors.Is(err, ErrCorruptBatch) {
 		t.Fatalf("expected WAL corruption error, got %v", err)
 	}
 }

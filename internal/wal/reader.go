@@ -55,7 +55,7 @@ func (r *Reader) Next() (payload []byte, err error) {
 	}
 	if errors.Is(err, io.ErrUnexpectedEOF) || n < record.HeaderSize {
 		// Partial read: truncated header
-		return nil, ErrTruncated
+		return nil, record.ErrTruncated
 	}
 	if err != nil {
 		// Other I/O error
@@ -73,7 +73,7 @@ func (r *Reader) Next() (payload []byte, err error) {
 	n, err = io.ReadFull(r.buf, payload)
 	if errors.Is(err, io.ErrUnexpectedEOF) || n < int(payloadLen) {
 		// Partial read: truncated payload
-		return nil, ErrTruncated
+		return nil, record.ErrTruncated
 	}
 	if err != nil {
 		// Other I/O error (unlikely for ReadFull, but handle it)
