@@ -37,7 +37,7 @@ coverage:
 lint:
 	golangci-lint run ./...
 
-## fmt: Checks code formatting using golangci-lint
+## fmt-check: Checks code formatting using golangci-lint
 fmt-check:
 	golangci-lint fmt --diff
 

@@ -8,7 +8,7 @@ var (
 	ErrCorruptRecord = errors.New("beachdb/wal: corrupt record")
 
 	// ErrBadHeader indicates when the header has an invalid length.
-	// This occurs when len(header) != recordHeaderSize (12 bytes).
+	// This occurs when len(header) != recordHeaderSize (18 bytes).
 	ErrBadHeader = errors.New("beachdb/wal: invalid header length")
 
 	// ErrChecksum indicates that a checksum is not matched.

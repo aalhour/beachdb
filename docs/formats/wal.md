@@ -21,22 +21,22 @@ WAL Record Layout (v1)
 
 Offset  Size  Field       Description
 ------  ----  -----       -----------
-0       2     magic       0xBE 0xAC ("BEach")
-2       1     version     0x01 for v1
-3       1     type        Record type (0x01 = Full)
-4       4     length      Payload length in bytes (big-endian uint32)
-8       4     checksum    CRC32C of payload (big-endian uint32)
-12      N     payload     Encoded batch (N = length bytes)
+0       8     magic       ASCII "BEACHWAL"
+8       1     version     0x01 for v1
+9       1     type        Record type (0x01 = Full)
+10      4     length      Payload length in bytes (big-endian uint32)
+14      4     checksum    CRC32C of payload (big-endian uint32)
+18      N     payload     Encoded batch (N = length bytes)
 
-Header size: 12 bytes
-Total record size: 12 + length bytes
+Header size: 18 bytes
+Total record size: 18 + length bytes
 ```
 
 ### Field Details
 
 | Field | Value | Purpose |
 |-------|-------|---------|
-| `magic` | `0xBEAC` | Identifies this as a BeachDB WAL record. Helps `wal_dump` reject garbage files and aids recovery scanning. |
+| `magic` | ASCII `"BEACHWAL"` | Identifies this as a BeachDB WAL record. Helps `wal_dump` reject garbage files and aids recovery scanning. |
 | `version` | `0x01` | Format version. Allows future changes without silent misinterpretation. |
 | `type` | `0x01` | Record type. v1 only uses `Full` (complete record). Reserved for future fragmentation support. |
 | `length` | uint32 | Payload size. Tells the reader exactly how many bytes to read after the header. |
@@ -75,7 +75,7 @@ The payload of a WAL record is an encoded `Batch`. See [batch.md](batch.md) for 
 
 A truncated record at the end of the WAL means the process crashed mid-write:
 
-- **Truncated header** (< 12 bytes): Ignore, treat as EOF.
+- **Truncated header** (< 18 bytes): Ignore, treat as EOF.
 - **Truncated payload** (header valid, payload incomplete): Ignore, treat as EOF.
 - After recovery, truncate the WAL back to the last fully validated record
   before reopening it for append.
@@ -106,7 +106,7 @@ v1 does not attempt repair. Corruption is surfaced, not hidden.
 
 I decided to put the checksum in the header (before the payload) rather than as a trailing field. This means the reader can:
 
-1. Read 12 bytes (fixed header size).
+1. Read 18 bytes (fixed header size).
 2. Know the payload length and expected checksum before reading anything else.
 3. Reject obviously broken headers (bad magic, absurd length) without reading the payload at all.
 
@@ -148,15 +148,17 @@ CRC32C (Castagnoli) over plain CRC32 because:
 
 3. **Industry standard.** Used by RocksDB, LevelDB, Spanner, and others.
 
-### Why a magic number?
+### Why an 8-byte ASCII magic?
 
-The 2-byte magic (`0xBEAC`) serves two purposes:
+The 8-byte ASCII magic `BEACHWAL` serves three purposes:
 
-1. **File identification.** If `wal_dump` opens a JPEG by accident, it fails immediately with "bad magic" instead of interpreting pixel data as batches.
+1. **File identification at a glance.** A hex dump immediately reveals what kind of file this is, and no decoder ring is needed. The whole family of BeachDB binary formats reads the same way.
 
-2. **Recovery scanning.** If I ever need to scan a partially corrupted WAL looking for valid records, the magic gives me a sync point. (Not implemented in v1, but the format supports it.)
+2. **Tool safety.** If `wal_dump` opens a JPEG by accident, it fails immediately with "bad magic" instead of interpreting pixel data as batches.
 
-Two bytes is enough for these purposes without wasting space.
+3. **Recovery scanning.** If I ever need to scan a partially corrupted WAL looking for valid records, the magic gives me a sync point. Eight bytes makes accidental matches in random data effectively impossible. (Recovery scanning is not implemented in v1, but the format supports it.)
+
+Eight bytes is enough for these purposes without wasting space.
 
 ### Why a version byte?
 

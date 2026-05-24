@@ -9,6 +9,40 @@ import (
 	"github.com/aalhour/beachdb/internal/util/coding"
 )
 
+// validMagicBytes returns a copy of the WAL magic for use in header fixtures.
+func validMagicBytes() []byte {
+	out := make([]byte, walMagicSize)
+	copy(out, walMagic)
+	return out
+}
+
+// buildTestRecordHeader builds a header fixture from explicit field values,
+// using the production layout offsets so the test never owns the layout.
+func buildTestRecordHeader(magic []byte, version byte, recordType byte, length uint32, csum uint32) []byte {
+	hdr := make([]byte, recordHeaderSize)
+	copy(hdr[walMagicOffset:walMagicOffset+walMagicSize], magic)
+	hdr[walVersionOffset] = version
+	hdr[walTypeOffset] = recordType
+	coding.PutUint32(hdr[walLengthOffset:walLengthOffset+walLengthSize], length)
+	coding.PutUint32(hdr[walChecksumOffset:walChecksumOffset+walChecksumSize], csum)
+	return hdr
+}
+
+// recordMagicSlice returns the magic bytes section of an encoded record.
+func recordMagicSlice(rec []byte) []byte {
+	return rec[walMagicOffset : walMagicOffset+walMagicSize]
+}
+
+// recordLengthSlice returns the length bytes section of an encoded record.
+func recordLengthSlice(rec []byte) []byte {
+	return rec[walLengthOffset : walLengthOffset+walLengthSize]
+}
+
+// recordChecksumSlice returns the checksum bytes section of an encoded record.
+func recordChecksumSlice(rec []byte) []byte {
+	return rec[walChecksumOffset : walChecksumOffset+walChecksumSize]
+}
+
 func TestEncodeRecord(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -16,19 +50,19 @@ func TestEncodeRecord(t *testing.T) {
 		wantLength int
 	}{
 		{
-			name:       "nil payload produces 12 bytes",
+			name:       "nil payload produces header-only record",
 			payload:    nil,
-			wantLength: 12,
+			wantLength: recordHeaderSize,
 		},
 		{
-			name:       "empty payload produces 12 bytes",
+			name:       "empty payload produces header-only record",
 			payload:    []byte{},
-			wantLength: 12,
+			wantLength: recordHeaderSize,
 		},
 		{
-			name:       "single byte payload produces 13 bytes",
+			name:       "single byte payload produces header + 1 byte",
 			payload:    []byte{0x01},
-			wantLength: 13,
+			wantLength: recordHeaderSize + 1,
 		},
 		{
 			name: "real payload with operations produce correct checksum and length",
@@ -43,17 +77,17 @@ func TestEncodeRecord(t *testing.T) {
 				0, 0, 0, 10, // value_len = 10
 				'j', 'o', 'h', 'n', ' ', 's', 'm', 'i', 't', 'h', // value = "john smith",
 			},
-			wantLength: 43,
+			wantLength: recordHeaderSize + 31,
 		},
 		{
 			name:       "large payload",
 			payload:    make([]byte, 10000),
-			wantLength: 10012,
+			wantLength: recordHeaderSize + 10000,
 		},
 		{
 			name:       "binary data with null bytes",
 			payload:    []byte{0x00, 0xFF, 0x00, 0x42, 0x00},
-			wantLength: 17,
+			wantLength: recordHeaderSize + 5,
 		},
 	}
 
@@ -65,24 +99,23 @@ func TestEncodeRecord(t *testing.T) {
 				t.Errorf("length = %d, want %d", len(got), tt.wantLength)
 			}
 
-			// Check magic using constant
-			gotMagic := coding.Uint16(got[0:2])
-			if gotMagic != walMagic {
-				t.Errorf("magic = 0x%X, want 0x%X", gotMagic, walMagic)
+			// Check magic
+			if string(recordMagicSlice(got)) != walMagic {
+				t.Errorf("magic = %q, want %q", recordMagicSlice(got), walMagic)
 			}
 
 			// Check version
-			if got[2] != walVersion {
-				t.Errorf("version = %d, want %d", got[2], walVersion)
+			if got[walVersionOffset] != walVersion {
+				t.Errorf("version = %d, want %d", got[walVersionOffset], walVersion)
 			}
 
 			// Check record type
-			if got[3] != RecordTypeFull {
-				t.Errorf("recordType = %d, want %d", got[3], RecordTypeFull)
+			if got[walTypeOffset] != RecordTypeFull {
+				t.Errorf("recordType = %d, want %d", got[walTypeOffset], RecordTypeFull)
 			}
 
 			// Check payload length field
-			gotPayloadLen := coding.Uint32(got[4:8])
+			gotPayloadLen := coding.Uint32(recordLengthSlice(got))
 			//nolint:gosec // G115: len(tt.payload) is bounded by test data, overflow not possible
 			if gotPayloadLen != uint32(len(tt.payload)) {
 				t.Errorf("payloadLen = %d, want %d", gotPayloadLen, len(tt.payload))
@@ -90,13 +123,13 @@ func TestEncodeRecord(t *testing.T) {
 
 			// Check checksum
 			wantCRC := checksum.CRC32C(tt.payload)
-			gotCRC := coding.Uint32(got[8:12])
+			gotCRC := coding.Uint32(recordChecksumSlice(got))
 			if gotCRC != wantCRC {
 				t.Errorf("checksum = 0x%X, want 0x%X", gotCRC, wantCRC)
 			}
 
 			// Check payload is preserved correctly
-			if !bytes.Equal(got[12:], tt.payload) {
+			if !bytes.Equal(got[recordHeaderSize:], tt.payload) {
 				t.Errorf("payload not preserved correctly")
 			}
 		})
@@ -111,8 +144,8 @@ func TestEncodeRecordProperties(t *testing.T) {
 		record1 := EncodeRecord(payload1)
 		record2 := EncodeRecord(payload2)
 
-		checksum1 := coding.Uint32(record1[8:12])
-		checksum2 := coding.Uint32(record2[8:12])
+		checksum1 := coding.Uint32(recordChecksumSlice(record1))
+		checksum2 := coding.Uint32(recordChecksumSlice(record2))
 
 		if checksum1 == checksum2 {
 			t.Error("different payloads should produce different checksums")
@@ -152,53 +185,33 @@ func TestDecodeRecordHeader(t *testing.T) {
 		wantErr        error
 	}{
 		{
-			name: "valid header with zero-length payload",
-			header: []byte{
-				0xBE, 0xAC, // magic
-				0x01,       // version
-				0x01,       // record type (Full)
-				0, 0, 0, 0, // payload length = 0
-				0, 0, 0, 0, // checksum = 0
-			},
+			name:           "valid header with zero-length payload",
+			header:         buildTestRecordHeader(validMagicBytes(), walVersion, RecordTypeFull, 0, 0),
 			wantPayloadLen: 0,
 			wantChecksum:   0,
 			wantErr:        nil,
 		},
 		{
-			name: "valid header with non-zero payload length and checksum",
-			header: []byte{
-				0xBE, 0xAC, // magic
-				0x01,             // version
-				0x01,             // record type (Full)
-				0, 0, 0x01, 0x00, // payload length = 256 (big endian)
-				0xDE, 0xAD, 0xBE, 0xEF, // checksum
-			},
+			name:           "valid header with non-zero payload length and checksum",
+			header:         buildTestRecordHeader(validMagicBytes(), walVersion, RecordTypeFull, 256, 0xDEADBEEF),
 			wantPayloadLen: 256,
 			wantChecksum:   0xDEADBEEF,
 			wantErr:        nil,
 		},
 		{
 			name: "valid header with max supported payload length",
-			header: []byte{
-				0xBE, 0xAC, // magic
-				0x01,                   // version
-				0x01,                   // record type (Full)
-				0x04, 0x00, 0x00, 0x00, // payload length = 64 MiB
-				0x12, 0x34, 0x56, 0x78, // checksum
-			},
+			header: buildTestRecordHeader(
+				validMagicBytes(), walVersion, RecordTypeFull, maxRecordPayloadSize, 0x12345678,
+			),
 			wantPayloadLen: maxRecordPayloadSize,
 			wantChecksum:   0x12345678,
 			wantErr:        nil,
 		},
 		{
 			name: "oversized payload length is rejected",
-			header: []byte{
-				0xBE, 0xAC,
-				0x01,
-				0x01,
-				0x04, 0x00, 0x00, 0x01,
-				0x12, 0x34, 0x56, 0x78,
-			},
+			header: buildTestRecordHeader(
+				validMagicBytes(), walVersion, RecordTypeFull, maxRecordPayloadSize+1, 0x12345678,
+			),
 			wantPayloadLen: 0,
 			wantChecksum:   0,
 			wantErr:        ErrRecordTooLarge,
@@ -211,109 +224,75 @@ func TestDecodeRecordHeader(t *testing.T) {
 			wantErr:        ErrTruncated,
 		},
 		{
-			name:           "truncated header - 11 bytes",
-			header:         []byte{0xBE, 0xAC, 0x01, 0x01, 0, 0, 0, 5, 0, 0, 0},
+			name:           "truncated header - one byte short",
+			header:         make([]byte, recordHeaderSize-1),
 			wantPayloadLen: 0,
 			wantChecksum:   0,
 			wantErr:        ErrTruncated,
 		},
 		{
 			name: "bad magic - first byte wrong",
-			header: []byte{
-				0x00, 0xAC, // bad magic
-				0x01, 0x01,
-				0, 0, 0, 0,
-				0, 0, 0, 0,
-			},
+			header: func() []byte {
+				m := validMagicBytes()
+				m[0] = 0x00
+				return buildTestRecordHeader(m, walVersion, RecordTypeFull, 0, 0)
+			}(),
 			wantPayloadLen: 0,
 			wantChecksum:   0,
 			wantErr:        ErrBadMagic,
 		},
 		{
-			name: "bad magic - second byte wrong",
-			header: []byte{
-				0xBE, 0x00, // bad magic
-				0x01, 0x01,
-				0, 0, 0, 0,
-				0, 0, 0, 0,
-			},
+			name: "bad magic - last byte wrong",
+			header: func() []byte {
+				m := validMagicBytes()
+				m[walMagicSize-1] = 0x00
+				return buildTestRecordHeader(m, walVersion, RecordTypeFull, 0, 0)
+			}(),
 			wantPayloadLen: 0,
 			wantChecksum:   0,
 			wantErr:        ErrBadMagic,
 		},
 		{
-			name: "bad magic - both bytes wrong",
-			header: []byte{
-				0xCA, 0xFE, // bad magic
-				0x01, 0x01,
-				0, 0, 0, 0,
-				0, 0, 0, 0,
-			},
+			name:           "bad magic - all zeros",
+			header:         buildTestRecordHeader(make([]byte, walMagicSize), walVersion, RecordTypeFull, 0, 0),
 			wantPayloadLen: 0,
 			wantChecksum:   0,
 			wantErr:        ErrBadMagic,
 		},
 		{
-			name: "unsupported version - zero",
-			header: []byte{
-				0xBE, 0xAC,
-				0x00, // version 0
-				0x01,
-				0, 0, 0, 0,
-				0, 0, 0, 0,
-			},
+			name:           "unsupported version - zero",
+			header:         buildTestRecordHeader(validMagicBytes(), 0x00, RecordTypeFull, 0, 0),
 			wantPayloadLen: 0,
 			wantChecksum:   0,
 			wantErr:        ErrUnsupportedVersion,
 		},
 		{
-			name: "unsupported version - future version",
-			header: []byte{
-				0xBE, 0xAC,
-				0x02, // version 2
-				0x01,
-				0, 0, 0, 0,
-				0, 0, 0, 0,
-			},
+			name:           "unsupported version - future version",
+			header:         buildTestRecordHeader(validMagicBytes(), 0x02, RecordTypeFull, 0, 0),
 			wantPayloadLen: 0,
 			wantChecksum:   0,
 			wantErr:        ErrUnsupportedVersion,
 		},
 		{
-			name: "unsupported record type - zero",
-			header: []byte{
-				0xBE, 0xAC,
-				0x01,
-				0x00, // record type 0
-				0, 0, 0, 0,
-				0, 0, 0, 0,
-			},
+			name:           "unsupported record type - zero",
+			header:         buildTestRecordHeader(validMagicBytes(), walVersion, 0x00, 0, 0),
 			wantPayloadLen: 0,
 			wantChecksum:   0,
 			wantErr:        ErrUnsupportedRecordType,
 		},
 		{
-			name: "unsupported record type - unknown type",
-			header: []byte{
-				0xBE, 0xAC,
-				0x01,
-				0xFF, // unknown record type
-				0, 0, 0, 0,
-				0, 0, 0, 0,
-			},
+			name:           "unsupported record type - unknown type",
+			header:         buildTestRecordHeader(validMagicBytes(), walVersion, 0xFF, 0, 0),
 			wantPayloadLen: 0,
 			wantChecksum:   0,
 			wantErr:        ErrUnsupportedRecordType,
 		},
 		{
 			name: "header with extra trailing bytes returns ErrBadHeader",
-			header: []byte{
-				0xBE, 0xAC,
-				0x01, 0x01,
-				0, 0, 0, 10,
-				0xAB, 0xCD, 0xEF, 0x12,
-				0xFF, 0xFF, 0xFF, // extra bytes (invalid - header must be exactly 12 bytes)
-			},
+			header: append(
+				buildTestRecordHeader(validMagicBytes(), walVersion, RecordTypeFull, 10, 0xABCDEF12),
+				0xFF, 0xFF, 0xFF,
+			),
 			wantPayloadLen: 0,
 			wantChecksum:   0,
 			wantErr:        ErrBadHeader,
@@ -385,11 +364,11 @@ func TestCorruptionDetection(t *testing.T) {
 		record := EncodeRecord(payload)
 
 		// Corrupt a payload byte
-		record[12] ^= 0xFF
+		record[recordHeaderSize] ^= 0xFF
 
 		// Extract stored checksum and compute actual
-		storedChecksum := coding.Uint32(record[8:12])
-		actualChecksum := checksum.CRC32C(record[12:])
+		storedChecksum := coding.Uint32(recordChecksumSlice(record))
+		actualChecksum := checksum.CRC32C(record[recordHeaderSize:])
 
 		if storedChecksum == actualChecksum {
 			t.Error("corruption should be detectable via checksum mismatch")
@@ -400,8 +379,9 @@ func TestCorruptionDetection(t *testing.T) {
 		payload := []byte{0x01, 0x02, 0x03}
 		record := EncodeRecord(payload)
 
-		// Corrupt the length field
-		record[7] ^= 0xFF
+		// Corrupt the LSB of the length field so the new value still decodes
+		// as a valid-sized length (otherwise the decoder rejects with ErrRecordTooLarge).
+		record[walLengthOffset+walLengthSize-1] ^= 0xFF
 
 		payloadLen, _, err := DecodeRecordHeader(record[:recordHeaderSize])
 		if err != nil {
@@ -420,7 +400,7 @@ func TestCorruptionDetection(t *testing.T) {
 		record := EncodeRecord(payload)
 
 		// Corrupt the magic
-		record[0] ^= 0xFF
+		record[walMagicOffset] ^= 0xFF
 
 		_, _, err := DecodeRecordHeader(record[:recordHeaderSize])
 		if !errors.Is(err, ErrBadMagic) {
@@ -433,7 +413,7 @@ func TestCorruptionDetection(t *testing.T) {
 		record := EncodeRecord(payload)
 
 		// Corrupt the version
-		record[2] = 0x99
+		record[walVersionOffset] = 0x99
 
 		_, _, err := DecodeRecordHeader(record[:recordHeaderSize])
 		if !errors.Is(err, ErrUnsupportedVersion) {
@@ -570,7 +550,7 @@ func FuzzDecodeRecordHeader(f *testing.F) {
 	validHeader := EncodeRecord([]byte{0x01, 0x02, 0x03})[:recordHeaderSize]
 	f.Add(validHeader)
 	f.Add([]byte{})
-	f.Add([]byte{0xBE, 0xAC, 0x01, 0x01, 0, 0, 0, 0, 0, 0, 0, 0})
+	f.Add(buildTestRecordHeader(validMagicBytes(), walVersion, RecordTypeFull, 0, 0))
 
 	f.Fuzz(func(_ *testing.T, header []byte) {
 		// Just ensure it doesn't panic
@@ -588,18 +568,11 @@ func ExampleEncodeRecord() {
 
 // ExampleDecodeRecordHeader demonstrates decoding a WAL record header.
 func ExampleDecodeRecordHeader() {
-	// Create a valid header
-	header := make([]byte, recordHeaderSize)
-	coding.PutUint16(header[0:], walMagic)
-	header[2] = walVersion
-	header[3] = RecordTypeFull
-	coding.PutUint32(header[4:], 5)          // payload length = 5
-	coding.PutUint32(header[8:], 0x12345678) // checksum
-
-	payloadLen, checksum, err := DecodeRecordHeader(header)
+	header := buildTestRecordHeader(validMagicBytes(), walVersion, RecordTypeFull, 5, 0x12345678)
+	payloadLen, csum, err := DecodeRecordHeader(header)
 	if err != nil {
 		return
 	}
-	_, _ = payloadLen, checksum
+	_, _ = payloadLen, csum
 	// Output:
 }

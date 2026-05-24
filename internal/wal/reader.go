@@ -84,7 +84,7 @@ func (r *Reader) Next() (payload []byte, err error) {
 		return nil, err
 	}
 
-	r.pos += recordHeaderSize + int64(payloadLen)
+	r.pos += int64(recordHeaderSize) + int64(payloadLen)
 
 	return payload, nil
 }

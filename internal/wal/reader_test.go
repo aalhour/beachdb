@@ -479,9 +479,11 @@ func TestReader_Next(t *testing.T) {
 	t.Run("returns error on truncated header", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "truncated_header.wal")
 
-		// Write partial header (less than 12 bytes)
+		// Write partial header (less than recordHeaderSize bytes)
+		partial := make([]byte, recordHeaderSize-1)
+		copy(partial, walMagic)
 		//nolint:gosec // G306: 0644 is acceptable for test files
-		os.WriteFile(path, []byte{0xBE, 0xAC, 0x01, 0x01, 0x00}, 0644)
+		os.WriteFile(path, partial, 0644)
 
 		r, _ := NewReader(path)
 		defer r.Close()
@@ -496,21 +498,7 @@ func TestReader_Next(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "truncated_payload.wal")
 
 		// Create a valid header claiming 100 bytes payload, but provide fewer
-		header := make([]byte, recordHeaderSize, recordHeaderSize+10)
-		header[0] = 0xBE // magic high byte (big-endian: 0xBEAC)
-		header[1] = 0xAC // magic low byte
-		header[2] = 0x01 // version
-		header[3] = 0x01 // type = Full
-		// payload length = 100 (big-endian)
-		header[4] = 0x00
-		header[5] = 0x00
-		header[6] = 0x00
-		header[7] = 0x64 // 100 in hex
-		// checksum (doesn't matter, we'll fail before validation)
-		header[8] = 0x00
-		header[9] = 0x00
-		header[10] = 0x00
-		header[11] = 0x00
+		header := buildTestRecordHeader(validMagicBytes(), walVersion, RecordTypeFull, 100, 0)
 
 		// Only provide 10 bytes of payload
 		data := append(append([]byte(nil), header...), make([]byte, 10)...)
@@ -530,11 +518,9 @@ func TestReader_Next(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "bad_magic.wal")
 
 		// Create header with wrong magic
-		header := make([]byte, recordHeaderSize)
-		header[0] = 0xDE // wrong magic
-		header[1] = 0xAD
-		header[2] = 0x01
-		header[3] = 0x01
+		bad := make([]byte, walMagicSize)
+		copy(bad, []byte("DEADBEEF"))
+		header := buildTestRecordHeader(bad, walVersion, RecordTypeFull, 0, 0)
 		//nolint:gosec // G306: 0644 is acceptable for test files
 		os.WriteFile(path, header, 0644)
 
@@ -550,12 +536,7 @@ func TestReader_Next(t *testing.T) {
 	t.Run("returns error on unsupported version", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "bad_version.wal")
 
-		// Create header with wrong version (big-endian magic: 0xBE, 0xAC)
-		header := make([]byte, recordHeaderSize)
-		header[0] = 0xBE
-		header[1] = 0xAC
-		header[2] = 0x99 // unsupported version
-		header[3] = 0x01
+		header := buildTestRecordHeader(validMagicBytes(), 0x99, RecordTypeFull, 0, 0)
 		//nolint:gosec // G306: 0644 is acceptable for test files
 		os.WriteFile(path, header, 0644)
 
@@ -571,15 +552,7 @@ func TestReader_Next(t *testing.T) {
 	t.Run("returns error on oversized payload length", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "oversized_payload.wal")
 
-		header := make([]byte, recordHeaderSize)
-		header[0] = 0xBE
-		header[1] = 0xAC
-		header[2] = 0x01
-		header[3] = 0x01
-		header[4] = 0x04 // 64 MiB + 1
-		header[5] = 0x00
-		header[6] = 0x00
-		header[7] = 0x01
+		header := buildTestRecordHeader(validMagicBytes(), walVersion, RecordTypeFull, maxRecordPayloadSize+1, 0)
 		//nolint:gosec // G306: 0644 is acceptable for test files
 		if err := os.WriteFile(path, header, 0644); err != nil {
 			t.Fatalf("failed to write oversized header: %v", err)
@@ -743,12 +716,7 @@ func TestReader_Next_EdgeCases(t *testing.T) {
 	t.Run("returns error on unsupported record type", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "bad_type.wal")
 
-		// Create header with unsupported record type (big-endian magic)
-		header := make([]byte, recordHeaderSize)
-		header[0] = 0xBE
-		header[1] = 0xAC
-		header[2] = 0x01
-		header[3] = 0x99 // unsupported type
+		header := buildTestRecordHeader(validMagicBytes(), walVersion, 0x99, 0, 0)
 		//nolint:gosec // G306: 0644 is acceptable for test files
 		os.WriteFile(path, header, 0644)
 
@@ -853,22 +821,10 @@ func TestReader_Next_ManualRecordConstruction(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "corrupt.wal")
 		payload := []byte("test")
 
-		// Manually construct with wrong checksum (big-endian magic: 0xBE, 0xAC)
-		record := make([]byte, recordHeaderSize+len(payload))
-		record[0] = 0xBE
-		record[1] = 0xAC
-		record[2] = 0x01
-		record[3] = 0x01
-		record[4] = 0x00
-		record[5] = 0x00
-		record[6] = 0x00
-		record[7] = byte(len(payload)) //nolint:gosec // G115: test data, length is small
-		// Wrong checksum
-		record[8] = 0xDE
-		record[9] = 0xAD
-		record[10] = 0xBE
-		record[11] = 0xEF
-		copy(record[12:], payload)
+		// Manually construct with wrong checksum
+		//nolint:gosec // G115: test data, length is small
+		header := buildTestRecordHeader(validMagicBytes(), walVersion, RecordTypeFull, uint32(len(payload)), 0xDEADBEEF)
+		record := append(append([]byte(nil), header...), payload...)
 
 		//nolint:gosec // G306: 0644 is acceptable for test files
 		os.WriteFile(path, record, 0644)
@@ -887,22 +843,9 @@ func TestReader_Next_ManualRecordConstruction(t *testing.T) {
 		payload := []byte("test payload")
 		csum := checksum.CRC32C(payload)
 
-		// Manually construct with correct checksum (big-endian magic: 0xBE, 0xAC)
-		record := make([]byte, recordHeaderSize+len(payload))
-		record[0] = 0xBE
-		record[1] = 0xAC
-		record[2] = 0x01
-		record[3] = 0x01
-		record[4] = 0x00
-		record[5] = 0x00
-		record[6] = 0x00
-		record[7] = byte(len(payload)) //nolint:gosec // G115: test data, length is small
-		// Correct checksum (big-endian)
-		record[8] = byte(csum >> 24) //nolint:gosec // G115: checksum bytes
-		record[9] = byte(csum >> 16) //nolint:gosec // G115: checksum bytes
-		record[10] = byte(csum >> 8) //nolint:gosec // G115: checksum bytes
-		record[11] = byte(csum)      //nolint:gosec // G115: checksum bytes
-		copy(record[12:], payload)
+		//nolint:gosec // G115: test data, length is small
+		header := buildTestRecordHeader(validMagicBytes(), walVersion, RecordTypeFull, uint32(len(payload)), csum)
+		record := append(append([]byte(nil), header...), payload...)
 
 		//nolint:gosec // G306: 0644 is acceptable for test files
 		os.WriteFile(path, record, 0644)
