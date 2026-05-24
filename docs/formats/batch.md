@@ -2,6 +2,8 @@
 
 > The Batch is BeachDB's unit of atomicity. It's the payload that goes into the WAL, and later becomes a Raft log entry.
 
+Introduced in BeachDB [v0.0.1](https://github.com/aalhour/beachdb/releases/tag/v0.0.1).
+
 ## Purpose
 
 A `Batch` is a sequence of Put and Delete operations that are applied atomically. The encoding serializes this in-memory structure into a flat byte array that can be:
@@ -83,6 +85,10 @@ Delete operations have no value fields — they only need to identify the key be
 |------|-------|-------------|
 | Put | `0x01` | Store a key-value pair |
 | Delete | `0x02` | Remove a key (tombstone) |
+
+The `op_type` byte has 256 possible values. v1 uses two. The other 254 are unallocated — v1 readers reject any unknown value as a hard error, so silent misinterpretation isn't possible.
+
+New op variants: table-aware writes, merge operators, or range deletes will belong in a v2 batch format, signaled by the version byte in the header. v1 won't be retrofitted with new op types.
 
 ---
 

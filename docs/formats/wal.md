@@ -2,6 +2,8 @@
 
 > The Write-Ahead Log is BeachDB's durability spine. Every committed batch lands here before it's acknowledged.
 
+Introduced in BeachDB [v0.0.1](https://github.com/aalhour/beachdb/releases/tag/v0.0.1).
+
 ## Goals
 
 - **Deterministic recovery**: Replay the same WAL twice, get the same state.
@@ -171,6 +173,25 @@ One byte gives me 255 future versions. That's plenty.
 I'm reserving the record type field for future fragmentation support. If a batch ever exceeds a convenient size (say, 32KB block boundary), I'd split it into First/Middle/Last fragments.
 
 For v1, every record is `Full`. But having the field costs 1 byte and saves a format version bump later.
+
+### Why the payload is opaque to the framing layer
+
+The header carries length and checksum. Nothing else about the payload. What's inside, which is a `Batch` in v1, is the payload's problem.
+
+This is why the manifest log can reuse the same framing with a different magic byte: the framing layer doesn't know or care that a `VersionEdit` is not a `Batch`. Same property holds when batches eventually become Raft log entries, and the WAL will still just store opaque bytes.
+
+The rule I follow: framing concerns live in the header (length, checksum, magic, fragmentation). Semantic concerns live in the payload, behind the payload's own version byte. The framing layer never peeks inside.
+
+### Why v1 doesn't reserve space for future features
+
+The header has a version byte and nothing else held aside for "later." No flags field, no payload-type discriminator, no padding slots.
+
+I considered reserving room for table IDs, encryption flags, and a few other things I expect to want eventually. I didn't, for two reasons:
+
+1. **Reserved bytes age badly.** Half the time the future feature doesn't fit the slot. The other half, every record on disk carries dead bytes forever for a feature that never shipped.
+2. **The version byte is the escape hatch.** When a new format version needs to exist, I will just bump the version flag (v1 -> v2) and write the fields that actually need to exist. v1 readers reject the new version cleanly instead of silently misreading.
+
+v1 ships small. v2 ships when there's a real reason.
 
 ---
 
