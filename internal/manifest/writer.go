@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/aalhour/beachdb/internal/fs"
 )
 
 // Writer provides sequential write access to a MANIFEST record stream.
@@ -33,13 +35,7 @@ func NewWriter(path string) (*Writer, error) {
 	// durable on disk. Without this, a crash after the file was created
 	// above can leave the file contents on disk but the dirent lost,
 	// making the MANIFEST invisible after recovery.
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("beachdb/manifest: failed to open parent dir: %w", err)
-	}
-	defer dir.Close()
-	if err := dir.Sync(); err != nil {
+	if err := fs.SyncDir(filepath.Dir(path)); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("beachdb/manifest: failed to sync parent dir: %w", err)
 	}
