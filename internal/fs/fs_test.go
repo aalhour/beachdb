@@ -1,4 +1,4 @@
-package engine
+package fs
 
 import (
 	"os"
@@ -10,8 +10,8 @@ import (
 func TestSyncDir_ValidDirectory(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := syncDir(dir); err != nil {
-		t.Fatalf("syncDir on valid directory: %v", err)
+	if err := SyncDir(dir); err != nil {
+		t.Fatalf("SyncDir on valid directory: %v", err)
 	}
 }
 
@@ -25,13 +25,13 @@ func TestSyncDir_WithNewFile(t *testing.T) {
 	}
 
 	// Sync the directory — this is the operation we're testing
-	if err := syncDir(dir); err != nil {
-		t.Fatalf("syncDir after file creation: %v", err)
+	if err := SyncDir(dir); err != nil {
+		t.Fatalf("SyncDir after file creation: %v", err)
 	}
 }
 
 func TestSyncDir_NonexistentPath(t *testing.T) {
-	err := syncDir("/nonexistent/path/that/does/not/exist")
+	err := SyncDir("/nonexistent/path/that/does/not/exist")
 	if err == nil {
 		t.Fatal("expected error for nonexistent directory, got nil")
 	}
@@ -40,19 +40,19 @@ func TestSyncDir_NonexistentPath(t *testing.T) {
 func TestSyncDir_FileNotDirectory(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create a regular file and try to syncDir on it
+	// Create a regular file and try to SyncDir on it
 	path := filepath.Join(dir, "not-a-dir.txt")
 	if err := os.WriteFile(path, []byte("hello"), 0600); err != nil {
 		t.Fatalf("creating file: %v", err)
 	}
 
-	// syncDir on a regular file should still succeed —
+	// SyncDir on a regular file should still succeed —
 	// os.Open + Sync works on files too. This test documents
-	// the behavior: syncDir doesn't validate that path is a directory.
+	// the behavior: SyncDir doesn't validate that path is a directory.
 	// If you want to enforce directory-only, add an os.Stat check.
-	err := syncDir(path)
+	err := SyncDir(path)
 	if err != nil {
-		t.Logf("syncDir on regular file returned: %v (platform-dependent)", err)
+		t.Logf("SyncDir on regular file returned: %v (platform-dependent)", err)
 	}
 }
 
@@ -60,8 +60,8 @@ func TestMkdirAllAndSync_CreatesNestedDirectories(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "a", "b", "c")
 
-	if err := mkdirAllAndSync(target); err != nil {
-		t.Fatalf("mkdirAllAndSync failed: %v", err)
+	if err := MkdirAllAndSync(target); err != nil {
+		t.Fatalf("MkdirAllAndSync failed: %v", err)
 	}
 
 	info, err := os.Stat(target)
@@ -76,8 +76,8 @@ func TestMkdirAllAndSync_CreatesNestedDirectories(t *testing.T) {
 func TestMkdirAllAndSync_ExistingDirectory(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := mkdirAllAndSync(dir); err != nil {
-		t.Fatalf("mkdirAllAndSync on existing directory failed: %v", err)
+	if err := MkdirAllAndSync(dir); err != nil {
+		t.Fatalf("MkdirAllAndSync on existing directory failed: %v", err)
 	}
 }
 
@@ -85,11 +85,11 @@ func TestMkdirAllAndSync_IdempotentNestedPath(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "nested", "path", "db")
 
-	if err := mkdirAllAndSync(target); err != nil {
-		t.Fatalf("first mkdirAllAndSync failed: %v", err)
+	if err := MkdirAllAndSync(target); err != nil {
+		t.Fatalf("first MkdirAllAndSync failed: %v", err)
 	}
-	if err := mkdirAllAndSync(target); err != nil {
-		t.Fatalf("second mkdirAllAndSync failed: %v", err)
+	if err := MkdirAllAndSync(target); err != nil {
+		t.Fatalf("second MkdirAllAndSync failed: %v", err)
 	}
 }
 
@@ -101,7 +101,7 @@ func TestMkdirAllAndSync_PathComponentIsFile(t *testing.T) {
 	}
 
 	target := filepath.Join(file, "child")
-	if err := mkdirAllAndSync(target); err == nil {
+	if err := MkdirAllAndSync(target); err == nil {
 		t.Fatal("expected error when path component is a file, got nil")
 	}
 }
@@ -160,9 +160,9 @@ func BenchmarkSyncDir(b *testing.B) {
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := syncDir(dir); err != nil {
-			b.Fatalf("syncDir: %v", err)
+	for range b.N {
+		if err := SyncDir(dir); err != nil {
+			b.Fatalf("SyncDir: %v", err)
 		}
 	}
 }
@@ -170,12 +170,12 @@ func BenchmarkSyncDir(b *testing.B) {
 func BenchmarkMkdirAllAndSync(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		b.StopTimer()
 		dir := filepath.Join(b.TempDir(), "sub", "dir")
 		b.StartTimer()
-		if err := mkdirAllAndSync(dir); err != nil {
-			b.Fatalf("mkdirAllAndSync: %v", err)
+		if err := MkdirAllAndSync(dir); err != nil {
+			b.Fatalf("MkdirAllAndSync: %v", err)
 		}
 	}
 }
@@ -190,7 +190,7 @@ func BenchmarkMissingDirs(b *testing.B) {
 	target := filepath.Join(existing, "c", "d", "e")
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, _ = missingDirs(target)
 	}
 }
