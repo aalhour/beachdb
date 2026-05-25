@@ -16,4 +16,10 @@ var (
 	// edit declared a size beyond what v1 accepts. Caps untrusted length
 	// prefixes so corruption can't trigger a multi-GiB allocation.
 	ErrEditFieldTooLarge = errors.New("beachdb/manifest: version edit field exceeds maximum size")
+
+	// ErrWriterClosed indicates when the manifest writer is closed.
+	ErrWriterClosed = errors.New("beachdb/manifest: writer is closed")
+
+	// ErrReaderClosed indicates when the manifest reader is closed.
+	ErrReaderClosed = errors.New("beachdb/manifest: reader is closed")
 )
