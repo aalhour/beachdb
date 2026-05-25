@@ -305,15 +305,18 @@ func (db *DB) Close() error {
 		db.mu.Unlock()
 		return ErrDBClosed
 	}
-	db.closed = true    // mark it as closed under the lock to reject new mutations
-	db.cond.Broadcast() // wake flush goroutine so it sees closed=true and exists
-	db.mu.Unlock()      // Release the lock before moving forward
+	db.closed = true          // mark it as closed under the lock to reject new mutations
+	flushCh := db.flushDoneCh // snapshot under the lock — flushLoop's deferred cleanup nils this field
+	db.cond.Broadcast()       // wake flush goroutine so it sees closed=true and exits
+	db.mu.Unlock()            // Release the lock before moving forward
 
 	// Wait for flush goroutine OUTSIDE the lock.
 	// The goroutine needs db.mu.Lock to finish its current flush.
 	// Waiting while holding the lock would definitely deadlock.
-	if db.flushDoneCh != nil {
-		<-db.flushDoneCh
+	// The snapshot above guards against a race with flushLoop's deferred
+	// nil-write of db.flushDoneCh.
+	if flushCh != nil {
+		<-flushCh
 	}
 
 	// Final cleanup under lock
