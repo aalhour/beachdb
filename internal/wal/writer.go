@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
+
+	"github.com/aalhour/beachdb/internal/fs"
 )
 
 // Writer provides sequential write access to WAL records.
@@ -15,12 +18,20 @@ type Writer struct {
 }
 
 // NewWriter creates a new Writer for the WAL file at the given path.
-// If the file exists, it will be opened in append mode.
+// If the file does not exist, it is created. The file is always opened in
+// append mode. The parent directory is fsynced so the new file's directory
+// entry is durable on disk; without this a crash can leave file contents
+// on disk but the dirent lost, making the WAL invisible after recovery.
 func NewWriter(path string) (*Writer, error) {
 	//nolint:gosec // G302: 0644 is acceptable for WAL files
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("wal: failed to open file: %w", err)
+	}
+
+	if err := fs.SyncDir(filepath.Dir(path)); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("wal: failed to sync parent dir: %w", err)
 	}
 
 	writer := &Writer{

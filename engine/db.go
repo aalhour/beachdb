@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/aalhour/beachdb/internal/crashhook"
+	"github.com/aalhour/beachdb/internal/fs"
 	"github.com/aalhour/beachdb/internal/keys"
 	"github.com/aalhour/beachdb/internal/memtable"
 	"github.com/aalhour/beachdb/internal/record"
@@ -75,7 +76,7 @@ func Open(dir string, opts ...Option) (*DB, error) {
 	cfg := applyOptions(opts)
 
 	// Create directory for the database and fsync created directory entries.
-	if err := mkdirAllAndSync(dir); err != nil {
+	if err := fs.MkdirAllAndSync(dir); err != nil {
 		return nil, err
 	}
 
@@ -122,7 +123,7 @@ func Open(dir string, opts ...Option) (*DB, error) {
 	// Sync the directory so the WAL file's directory entry reaches disk.
 	// Without this, a crash could leave the WAL data on disk but the
 	// directory unaware the file exists.
-	if err := syncDir(dir); err != nil {
+	if err := fs.SyncDir(dir); err != nil {
 		// Best effort: close the writer before returning
 		_ = writer.Close()
 		return nil, err
@@ -720,7 +721,7 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.R
 	}
 
 	// Sync parent directory so the new file's directory entry is durable
-	if err = syncDir(filepath.Dir(path)); err != nil {
+	if err = fs.SyncDir(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("beachdb: syncing directory after flush: %w", err)
 	}
 

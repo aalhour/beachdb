@@ -151,6 +151,10 @@ linters:
         # them as aliases, so wrapping at the shim boundary would duplicate
         # the namespace prefix and break errors.Is for callers.
         - github.com/aalhour/beachdb/internal/record
+        # The fs package returns errors prefixed "beachdb/fs:" with full
+        # context (operation, path). Callers passing them through unwrapped
+        # is intentional — re-wrapping would duplicate the namespace prefix.
+        - github.com/aalhour/beachdb/internal/fs
 
     # Misspell settings
     misspell:
