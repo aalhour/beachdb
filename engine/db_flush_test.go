@@ -196,6 +196,31 @@ func TestDB_CloseClosesSSTReaders(t *testing.T) {
 	}
 }
 
+// TestDB_Close_FlushDoneCh_NoRace is a regression guard against an unprotected
+// read of db.flushDoneCh in Close. After Close releases db.mu (so flushLoop can
+// finish its current flush), Close reads db.flushDoneCh outside any lock,
+// while flushLoop's deferred cleanup writes the same field under db.mu. The
+// race detector flags the mismatched synchronization on every run.
+//
+// Loop to give the detector multiple Open/Close cycles. A single iteration
+// is usually enough — go's race detector tracks happens-before, not actual
+// memory collisions — but a small loop hardens against future refactors that
+// could narrow the window.
+//
+// Run with: go test -race ./engine/ -run=TestDB_Close_FlushDoneCh_NoRace
+func TestDB_Close_FlushDoneCh_NoRace(t *testing.T) {
+	for range 20 {
+		dir := t.TempDir()
+		db, err := Open(dir, WithSync(false), WithMemtableFlushSize(512))
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+}
+
 // --- Flush path ---
 
 // Spec: "put entries, flush, verify SST file exists"
