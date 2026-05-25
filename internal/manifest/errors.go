@@ -22,4 +22,14 @@ var (
 
 	// ErrReaderClosed indicates when the manifest reader is closed.
 	ErrReaderClosed = errors.New("beachdb/manifest: reader is closed")
+
+	// ErrNoCurrentFile indicates that the CURRENT pointer file does not
+	// exist in the database directory. Callers (e.g. DB.Open) treat this
+	// as a signal that the database is fresh and proceed with bootstrap.
+	ErrNoCurrentFile = errors.New("beachdb/manifest: CURRENT file does not exist")
+
+	// ErrInvalidManifestName indicates that the manifest filename passed
+	// to WriteCurrent is empty or contains a path separator. CURRENT must
+	// hold a bare filename, not a path.
+	ErrInvalidManifestName = errors.New("beachdb/manifest: invalid manifest filename")
 )
