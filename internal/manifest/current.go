@@ -26,6 +26,7 @@ const (
 // database signal, not a hard error.
 func ReadCurrent(dir string) (string, error) {
 	path := filepath.Join(dir, currentFileName)
+
 	//nolint:gosec // G304: path is constructed from the trusted DB directory
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -39,6 +40,13 @@ func ReadCurrent(dir string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("beachdb/manifest: CURRENT is empty: %w", ErrInvalidManifestName)
 	}
+	// Symmetric validation with WriteCurrent: CURRENT must hold a bare
+	// filename, not a path. Without this, a malformed CURRENT lets the
+	// caller escape the database directory via path traversal.
+	if err := validateManifestName(name); err != nil {
+		return "", err
+	}
+
 	return name, nil
 }
 
