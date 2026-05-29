@@ -164,6 +164,10 @@ linters:
     # Use some standard exclusion presets
     presets:
       - std-error-handling
+    # Fully skip the scratchpad: it's a throwaway feature playground, not
+    # production code, and is gitignored.
+    paths:
+      - scratchpad/
     rules:
       # Exclude examples from all linters (they're for demonstration, not production)
       - path: examples/

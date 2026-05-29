@@ -34,7 +34,11 @@ test:
 examples:
 	@echo "Running examples..."
 	@for file in $$(find examples -name "*.go" -type f | sort); do \
-		echo "\n=== Running $$file ==="; \
+		header="=== Running $$file ==="; \
+		sep=$$(printf '%*s' $${#header} '' | tr ' ' '='); \
+		echo "\n$$sep"; \
+		echo "$$header"; \
+		echo "$$sep"; \
 		go run $$file || exit 1; \
 	done
 	@echo "\n✓ All examples completed successfully"
