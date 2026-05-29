@@ -38,9 +38,13 @@ func (k InternalKey) Compare(other InternalKey) int {
 	if cmp != 0 {
 		return cmp
 	}
+	// Larger sequence number means that `k` is newer, which means
+	// "recent/smaller", hence -1
 	if k.Seqno > other.Seqno {
 		return -1
 	}
+	// Smaller sequence number means that `k` is older, which means
+	// "older/bigger", hence 1
 	if k.Seqno < other.Seqno {
 		return 1
 	}

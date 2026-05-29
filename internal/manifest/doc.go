@@ -119,8 +119,8 @@
 //
 // # Current simplifications
 //
-// The following features are intentionally omitted from v1 and will land
-// in later milestones:
+// The following features are intentionally omitted from v1 and may land
+// in future work:
 //
 //   - No manifest rotation (the file grows unbounded for now)
 //   - No skip-unknown tag support (unknown tags hard-error)

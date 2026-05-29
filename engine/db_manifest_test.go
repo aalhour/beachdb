@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -124,11 +125,11 @@ func createRealSST(t *testing.T, dir string, fileID uint64) uint64 {
 		Kind:    keys.InternalKeyKindPut,
 	}, []byte("v"))
 
-	reader, err := writeSSTable(sstPath, mem, 0)
+	res, err := writeSSTable(sstPath, mem, 0)
 	if err != nil {
 		t.Fatalf("writeSSTable: %v", err)
 	}
-	_ = reader.Close()
+	_ = res.reader.Close()
 
 	info, err := os.Stat(sstPath)
 	if err != nil {
@@ -469,7 +470,7 @@ func TestBootstrap_NextOpenTakesReplayPath(t *testing.T) {
 
 // If bootstrap crashes between Append and WriteCurrent, the orphan
 // MANIFEST file is present but CURRENT is not. The next Open should
-// treat the directory as fresh (scenario 2) and continue.
+// treat the directory as fresh and continue.
 func TestBootstrap_CurrentInstallIsLast_SimulatedOrphan(t *testing.T) {
 	dir := t.TempDir()
 	// Plant an orphan MANIFEST with no CURRENT.
@@ -719,12 +720,45 @@ func TestOpen_PostStateInstalled(t *testing.T) {
 	}
 }
 
-// WAL replay continues from the manifest's LastSequence.
-// TODO: needs a flush that checkpoints seqno into the manifest before this
-// can produce a meaningful baseline. Currently flush does not write a
-// VersionEdit, so the seqno-in-manifest path is unreachable.
+// Open replays the manifest first (loading flushed SSTs) and then the WAL on
+// top, so a newer un-flushed write shadows the older flushed value for the
+// same key: the manifest wins on file existence, the WAL wins on recent data.
 func TestOpen_OrderingInvariant_ManifestBeforeWAL(t *testing.T) {
-	t.Skip("TODO: requires flush to checkpoint LastSequence in the manifest")
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+
+	// Older value flushed into an SST (recorded in the manifest).
+	if err := db.Put(ctx, []byte("k"), []byte("old-from-sst")); err != nil {
+		t.Fatalf("Put(old): %v", err)
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	// Newer value for the same key, left un-flushed in the WAL only.
+	if err := db.Put(ctx, []byte("k"), []byte("new-from-wal")); err != nil {
+		t.Fatalf("Put(new): %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db2, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer db2.Close()
+
+	got, err := db2.Get(ctx, []byte("k"))
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != "new-from-wal" {
+		t.Errorf("Get = %q, want %q (WAL replay must shadow the older SST value)", got, "new-from-wal")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -781,44 +815,390 @@ func TestClose_DoubleClose_WithManifest(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Flush + cross-restart durability (skipped pending wiring)
+// Flush + cross-restart durability
 //
-// TODO: these tests require publishFlushedSSTLocked to write a VersionEdit
-// to the manifest on every successful flush, plus matching crashhook
-// points around the SST-sync → manifest-append boundary. Until that
-// wiring lands, flush is invisible to the manifest and these scenarios
-// can't be exercised.
+// A successful flush appends a VersionEdit to the manifest (AddFile +
+// NextFileID + LastSequence). These tests exercise that the file set, SST id
+// counter, and sequence number all survive a close/reopen via the manifest.
 // ---------------------------------------------------------------------------
 
+// A successful flush appends an AddFile VersionEdit to the manifest. After
+// reopen the file is visible in the replayed Version with its captured key
+// range and a non-zero size.
 func TestFlush_WritesManifestEdit(t *testing.T) {
-	t.Skip("TODO: requires flush to write a VersionEdit per flush")
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	for _, k := range []string{"banana", "apple", "cherry"} {
+		if err := db.Put(ctx, []byte(k), []byte("v-"+k)); err != nil {
+			t.Fatalf("Put(%s): %v", k, err)
+		}
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db2, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer db2.Close()
+
+	files := db2.version.AllFiles()
+	if len(files) != 1 {
+		t.Fatalf("Version.AllFiles() = %d files, want 1", len(files))
+	}
+	f := files[0]
+	if f.Size == 0 {
+		t.Errorf("FileMetadata.Size = 0, want > 0")
+	}
+	if got := string(f.SmallestKey.UserKey); got != "apple" {
+		t.Errorf("SmallestKey = %q, want %q", got, "apple")
+	}
+	if got := string(f.LargestKey.UserKey); got != "cherry" {
+		t.Errorf("LargestKey = %q, want %q", got, "cherry")
+	}
 }
+
+// The SSTable is synced to disk before the manifest edit is appended, so a
+// crash in between leaves an orphan SST the manifest never references.
+// Exercising the crash itself needs the out-of-process crash harness; the
+// crashhook point (PointManifestAfterSSTSync) is wired in
+// publishFlushedSSTLocked for that harness.
 func TestFlush_OrderingInvariant_SSTBeforeManifest(t *testing.T) {
-	t.Skip("TODO: requires crashhook points around SST-sync → manifest-append")
+	t.Skip("TODO: crash point wired; scenario needs the out-of-process crash harness")
 }
+
+// When the manifest Append fails, flush returns an error, the open SST reader
+// is released, and the file is left as an orphan: the Version does not gain
+// the file and nextSSTID is not advanced, so the next flush reuses the id.
 func TestFlush_ManifestAppendFailure_SSTOrphaned(t *testing.T) {
-	t.Skip("TODO: requires a fault-injection point for manifest.Append")
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := db.Put(ctx, []byte("k"), []byte("v")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// Force the manifest Append to fail by closing the writer underneath
+	// the flush path.
+	if err := db.manifest.Close(); err != nil {
+		t.Fatalf("closing manifest writer: %v", err)
+	}
+
+	prevSSTID := db.nextSSTID
+	if err := db.Flush(); err == nil {
+		t.Fatal("Flush succeeded, want manifest append error")
+	}
+
+	if got := len(db.version.AllFiles()); got != 0 {
+		t.Errorf("Version.AllFiles() = %d, want 0 (edit must not apply on append failure)", got)
+	}
+	if db.nextSSTID != prevSSTID {
+		t.Errorf("nextSSTID advanced to %d, want %d (no advance on append failure)", db.nextSSTID, prevSSTID)
+	}
+	if !dirContains(t, dir, buildSSTFileName(prevSSTID)) {
+		t.Errorf("expected orphan SST %s on disk", buildSSTFileName(prevSSTID))
+	}
 }
+
+// NextFileID recorded in the flush edit is restored on reopen, so SST ids keep
+// climbing across restarts instead of resetting and overwriting files.
 func TestFlush_NextSSTIDPersistedViaManifest(t *testing.T) {
-	t.Skip("TODO: requires flush to record NextFileID in the manifest")
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := db.Put(ctx, []byte("k"), []byte("v")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db2, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer db2.Close()
+
+	// One flush starting at id 1 ⇒ next available id is 2.
+	if db2.nextSSTID != 2 {
+		t.Errorf("nextSSTID after reopen = %d, want 2", db2.nextSSTID)
+	}
 }
+
+// LastSequence checkpointed by a flush is restored on reopen. Deleting the WAL
+// isolates the manifest as the only seqno source.
 func TestFlush_LastSequencePersistedViaManifest(t *testing.T) {
-	t.Skip("TODO: requires flush to checkpoint LastSequence in the manifest")
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	const nPuts = 4
+	for i := range nPuts {
+		k := fmt.Sprintf("key-%d", i)
+		if err := db.Put(ctx, []byte(k), []byte("v")); err != nil {
+			t.Fatalf("Put(%s): %v", k, err)
+		}
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Remove the WAL so the manifest checkpoint is the sole seqno source.
+	if err := os.Remove(filepath.Join(dir, walFileName)); err != nil {
+		t.Fatalf("removing WAL: %v", err)
+	}
+
+	db2, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer db2.Close()
+
+	if db2.seqno != nPuts {
+		t.Errorf("seqno after reopen = %d, want %d (manifest LastSequence)", db2.seqno, nPuts)
+	}
 }
+
+// Several flushes each append an AddFile edit; all files are present in the
+// replayed Version and every key is readable after reopen.
 func TestFlush_Multiple_AllRecoverable(t *testing.T) {
-	t.Skip("TODO: requires flush to write a VersionEdit per flush")
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	wantKeys := []string{"alpha", "bravo", "charlie"}
+	for _, k := range wantKeys {
+		if err := db.Put(ctx, []byte(k), []byte("v-"+k)); err != nil {
+			t.Fatalf("Put(%s): %v", k, err)
+		}
+		if err := db.Flush(); err != nil {
+			t.Fatalf("Flush(%s): %v", k, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db2, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer db2.Close()
+
+	if got := len(db2.version.AllFiles()); got != len(wantKeys) {
+		t.Errorf("Version.AllFiles() = %d, want %d", got, len(wantKeys))
+	}
+	for _, k := range wantKeys {
+		got, err := db2.Get(ctx, []byte(k))
+		if err != nil {
+			t.Fatalf("Get(%s): %v", k, err)
+		}
+		if string(got) != "v-"+k {
+			t.Errorf("Get(%s) = %q, want %q", k, got, "v-"+k)
+		}
+	}
 }
+
+// After a flush, the data lives in the SSTable. Deleting the WAL before reopen
+// proves recovery comes from the manifest+SST, not the WAL.
 func TestRestart_DataFromSSTOnly(t *testing.T) {
-	t.Skip("TODO: requires flush wiring so SSTs are recoverable without the WAL")
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := db.Put(ctx, []byte("durable"), []byte("survives")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(dir, walFileName)); err != nil {
+		t.Fatalf("removing WAL: %v", err)
+	}
+
+	db2, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer db2.Close()
+
+	got, err := db2.Get(ctx, []byte("durable"))
+	if err != nil {
+		t.Fatalf("Get after WAL deletion: %v", err)
+	}
+	if string(got) != "survives" {
+		t.Errorf("Get = %q, want %q", got, "survives")
+	}
 }
+
+// On reopen, flushed data comes from the SST (manifest) and un-flushed data
+// comes from replaying the WAL on top.
 func TestRestart_DataFromSSTAndWAL(t *testing.T) {
-	t.Skip("TODO: requires flush wiring for the post-checkpoint WAL path")
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+
+	// Flushed key ⇒ ends up in an SST tracked by the manifest.
+	if err := db.Put(ctx, []byte("flushed"), []byte("from-sst")); err != nil {
+		t.Fatalf("Put(flushed): %v", err)
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	// Un-flushed key ⇒ only in the WAL + active memtable.
+	if err := db.Put(ctx, []byte("buffered"), []byte("from-wal")); err != nil {
+		t.Fatalf("Put(buffered): %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db2, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer db2.Close()
+
+	for k, want := range map[string]string{"flushed": "from-sst", "buffered": "from-wal"} {
+		got, err := db2.Get(ctx, []byte(k))
+		if err != nil {
+			t.Fatalf("Get(%s): %v", k, err)
+		}
+		if string(got) != want {
+			t.Errorf("Get(%s) = %q, want %q", k, got, want)
+		}
+	}
 }
+
+// After a flush + reopen, the next flush must use a fresh SST id rather than
+// reusing id 1 and overwriting the first file.
 func TestRestart_NextSSTID_NoCollisionsAfterCrash(t *testing.T) {
-	t.Skip("TODO: requires flush to checkpoint NextFileID across restarts")
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := db.Put(ctx, []byte("first"), []byte("1")); err != nil {
+		t.Fatalf("Put(first): %v", err)
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db2, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	if err := db2.Put(ctx, []byte("second"), []byte("2")); err != nil {
+		t.Fatalf("Put(second): %v", err)
+	}
+	if err := db2.Flush(); err != nil {
+		t.Fatalf("Flush after reopen: %v", err)
+	}
+	if err := db2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Both SSTs must coexist on disk under distinct ids.
+	if !dirContains(t, dir, buildSSTFileName(1)) {
+		t.Errorf("first SST %s missing", buildSSTFileName(1))
+	}
+	if !dirContains(t, dir, buildSSTFileName(2)) {
+		t.Errorf("second SST %s missing (id collision?)", buildSSTFileName(2))
+	}
+
+	db3, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen 2: %v", err)
+	}
+	defer db3.Close()
+	if got := len(db3.version.AllFiles()); got != 2 {
+		t.Errorf("Version.AllFiles() = %d, want 2", got)
+	}
 }
+
+// Sequence numbers stay monotonic across a flush + restart: a post-restart
+// write wins over the pre-restart value for the same key.
 func TestRestart_SeqnoMonotonic(t *testing.T) {
-	t.Skip("TODO: requires flush to checkpoint LastSequence across restarts")
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := db.Put(ctx, []byte("k"), []byte("old")); err != nil {
+		t.Fatalf("Put(old): %v", err)
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Drop the WAL so seqno is seeded solely from the manifest checkpoint.
+	if err := os.Remove(filepath.Join(dir, walFileName)); err != nil {
+		t.Fatalf("removing WAL: %v", err)
+	}
+
+	db2, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer db2.Close()
+
+	seqnoBefore := db2.seqno
+	if err := db2.Put(ctx, []byte("k"), []byte("new")); err != nil {
+		t.Fatalf("Put(new): %v", err)
+	}
+	if db2.seqno <= seqnoBefore {
+		t.Errorf("seqno did not advance: before=%d after=%d", seqnoBefore, db2.seqno)
+	}
+
+	got, err := db2.Get(ctx, []byte("k"))
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != "new" {
+		t.Errorf("Get = %q, want %q (post-restart write must win)", got, "new")
+	}
 }
 
 // ---------------------------------------------------------------------------

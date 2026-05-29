@@ -524,11 +524,23 @@ func (db *DB) flushLoop(doneCh chan struct{}) {
 
 		// Grab what we need under the lock
 		imm := db.immMem
+
+		// A concurrent rotation can hand off an empty memtable: two writers
+		// both pass the threshold check and queue on the flush slot, the
+		// first installs a fresh memtable, and the second freezes it before
+		// any write lands. Skip it — there is nothing to persist and an empty
+		// flush would record a zero-range file in the manifest.
+		if imm.Empty() {
+			db.immMem = nil
+			db.cond.Broadcast()
+			continue
+		}
+
 		sstPath := db.nextSSTPath()
 
 		// Release the lock for I/O - this is where the work happens
 		db.mu.Unlock()
-		newSSTableReader, err := writeSSTableFn(sstPath, imm, db.sstBlockSize)
+		flushResult, err := writeSSTableFn(sstPath, imm, db.sstBlockSize)
 
 		// Re-acquire the lock to publish the results
 		db.mu.Lock()
@@ -540,7 +552,7 @@ func (db *DB) flushLoop(doneCh chan struct{}) {
 		}
 
 		// Publish the new SSTable reader and clear the immutable memtable.
-		if err := db.publishFlushedSSTLocked(newSSTableReader); err != nil {
+		if err := db.publishFlushedSSTLocked(flushResult); err != nil {
 			db.flushErr = err
 			db.cond.Broadcast()
 			return
@@ -633,14 +645,51 @@ func (db *DB) flushMemtable() error {
 }
 
 // publishFlushedSSTLocked publishes a successfully flushed SSTable under db.mu.
-func (db *DB) publishFlushedSSTLocked(sstReader *sstable.Reader) error {
+func (db *DB) publishFlushedSSTLocked(flushResult sstWriteResult) error {
 	// FAILPOINT: sst_publish_error
 	if err := crashhook.MaybeFault(crashhook.FaultSSTPublishError); err != nil {
 		return fmt.Errorf("beachdb: publishing SSTable: %w", err)
 	}
 
+	// Create a new version edit and sync manifest with latest changes.
+	versionEdit := manifest.VersionEdit{
+		AddedFiles: []manifest.FileMetadata{
+			{
+				Level:       0,
+				FileID:      db.nextSSTID,
+				Size:        flushResult.size,
+				SmallestKey: flushResult.smallest,
+				LargestKey:  flushResult.largest,
+			},
+		},
+		HasNextFileID:   true,
+		NextFileID:      1 + db.nextSSTID,
+		HasLastSequence: true,
+		LastSequence:    db.seqno,
+	}
+
+	// The SSTable is already durable (writeSSTable synced the file and its
+	// parent directory); the manifest edit has not been appended yet.
+	// FAILPOINT: manifest_after_sst_sync
+	crashhook.CrashIfArmed(crashhook.PointManifestAfterSSTSync)
+
+	// Append the edit to the manifest --> this fsyncs the file + dir on disk!
+	if err := db.manifest.Append(versionEdit.Encode()); err != nil {
+		// The .sst file itself staying on disk is fine, it will be an orphan and will be
+		// deleted on the next `Open()`. nextSSTID isn't bumped so the id/path is reused.
+		_ = flushResult.reader.Close()
+		return fmt.Errorf("beachdb: appending flush edit to manifest: %w", err)
+	}
+
+	// The manifest edit is durable; the in-memory version has not been
+	// updated yet.
+	// FAILPOINT: manifest_after_append
+	crashhook.CrashIfArmed(crashhook.PointManifestAfterAppend)
+
+	// Update current version with the edit and append the sst reader to db.ssts
+	db.version = db.version.Apply(&versionEdit)
 	db.flushErr = nil
-	db.ssts = append(db.ssts, sstReader)
+	db.ssts = append(db.ssts, flushResult.reader)
 	db.immMem = nil
 	db.nextSSTID++
 
@@ -922,18 +971,72 @@ func replayExistingManifest(db *DB, current string) error {
 	return nil
 }
 
+// sstWriteResult carries the outputs of writing a memtable to an on-disk
+// SSTable: the open reader plus the metadata needed to record the new
+// file in a manifest VersionEdit.
+type sstWriteResult struct {
+	// reader is an open handle to the freshly written SSTable, ready to
+	// serve reads.
+	reader *sstable.Reader
+
+	// smallest is the smallest InternalKey in the SSTable (first key in
+	// sorted order).
+	smallest keys.InternalKey
+
+	// largest is the largest InternalKey in the SSTable (last key in
+	// sorted order).
+	largest keys.InternalKey
+
+	// size is the SSTable file size in bytes.
+	size uint64
+}
+
+// writeMemtableEntries adds every entry of mem to writer in ascending
+// InternalKey order, returning the smallest and largest keys written. The
+// memtable yields keys in sorted order, so the first key is the smallest and
+// the last is the largest. It returns ErrFlushEmptyMemtable when the memtable
+// has no entries.
+func writeMemtableEntries(
+	writer *sstable.Writer,
+	mem memtable.Memtable,
+) (smallest, largest keys.InternalKey, err error) {
+	iter := mem.NewIterator()
+	iter.SeekToFirst()
+
+	first := true
+	for iter.Valid() {
+		key := iter.Key()
+		if addErr := writer.Add(key, iter.Value()); addErr != nil {
+			_ = iter.Close()
+			return smallest, largest, fmt.Errorf("beachdb: writing entry to SSTable: %w", addErr)
+		}
+		if first {
+			smallest = key
+			first = false
+		}
+		largest = key
+		iter.Next()
+	}
+	_ = iter.Close()
+
+	if first {
+		return smallest, largest, ErrFlushEmptyMemtable
+	}
+	return smallest, largest, nil
+}
+
 // Helper function for writing a memtable to an SSTable file on disk.
 // blockSize controls the target data block size; 0 means use the sstable default.
-func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.Reader, error) {
+func writeSSTable(path string, mem memtable.Memtable, blockSize int) (sstWriteResult, error) {
 	// FAILPOINT: sst_write_error
 	if err := crashhook.MaybeFault(crashhook.FaultSSTWriteError); err != nil {
-		return nil, fmt.Errorf("beachdb: writing SSTable: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: writing SSTable: %w", err)
 	}
 
 	// Create the new sstable file
 	sstFile, err := os.Create(path) //nolint:gosec // path constructed from trusted db.dir + formatted ID
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrCreatingSSTFile, err)
+		return sstWriteResult{}, fmt.Errorf("%w: %w", ErrCreatingSSTFile, err)
 	}
 	defer sstFile.Close()
 
@@ -947,31 +1050,27 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.R
 	writer, err := sstable.NewWriter(sstFile, writerOpts...)
 	if err != nil {
 		_ = os.Remove(path) //nolint:gosec // path is constructed from the trusted DB directory
-		return nil, fmt.Errorf("beachdb: creating SSTable writer: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: creating SSTable writer: %w", err)
 	}
 
-	// Iterate the immutable memtable and write entries to the SSTable
-	iter := mem.NewIterator()
-	iter.SeekToFirst()
-	for iter.Valid() {
-		if err := writer.Add(iter.Key(), iter.Value()); err != nil {
-			_ = writer.Close()
-			_ = iter.Close()
-			_ = os.Remove(path) //nolint:gosec // path is constructed from the trusted DB directory
-			return nil, fmt.Errorf("beachdb: writing entry to SSTable: %w", err)
-		}
-		iter.Next()
+	// Write every memtable entry to the SSTable, capturing the key range.
+	// An empty memtable is rejected (it would record a zero-value key range
+	// in the manifest).
+	smallestKey, largestKey, err := writeMemtableEntries(writer, mem)
+	if err != nil {
+		_ = writer.Close()
+		_ = os.Remove(path) //nolint:gosec // path is constructed from the trusted DB directory
+		return sstWriteResult{}, err
 	}
 
-	_ = iter.Close()
 	if err = writer.Close(); err != nil {
 		_ = os.Remove(path) //nolint:gosec // path is constructed from the trusted DB directory
-		return nil, fmt.Errorf("beachdb: closing SSTable writer: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: closing SSTable writer: %w", err)
 	}
 
 	// Sync parent directory so the new file's directory entry is durable
 	if err = fs.SyncDir(filepath.Dir(path)); err != nil {
-		return nil, fmt.Errorf("beachdb: syncing directory after flush: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: syncing directory after flush: %w", err)
 	}
 
 	// FAILPOINT: flush_after_file_sync
@@ -980,17 +1079,29 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.R
 	// Re-open the file for reading
 	sstFileReadMode, err := os.Open(path) //nolint:gosec // path constructed from trusted db.dir + formatted ID
 	if err != nil {
-		return nil, fmt.Errorf("beachdb: opening SSTable for reading: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: opening SSTable for reading: %w", err)
 	}
 
 	// Create a reader for the newest sstable
 	sstReader, err := sstable.OpenReader(sstFileReadMode)
 	if err != nil {
 		_ = sstFileReadMode.Close()
-		return nil, fmt.Errorf("beachdb: error reading newly flushed SSTable: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: error reading newly flushed SSTable: %w", err)
 	}
 
-	return sstReader, nil
+	fileSize := sstReader.FileSize()
+	if fileSize < 0 {
+		_ = sstReader.Close()
+		return sstWriteResult{}, fmt.Errorf("beachdb: SSTable %q reports negative size %d", path, fileSize)
+	}
+
+	result := sstWriteResult{
+		reader:   sstReader,
+		smallest: smallestKey,
+		largest:  largestKey,
+		size:     uint64(fileSize),
+	}
+	return result, nil
 }
 
 // buildSSTFileName builds an SSTable file name from a file ID,

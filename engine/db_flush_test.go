@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aalhour/beachdb/internal/keys"
 	"github.com/aalhour/beachdb/internal/memtable"
 	"github.com/aalhour/beachdb/internal/sstable"
 )
@@ -340,8 +341,8 @@ func TestFlush_SynchronousFailurePreservesReadableData(t *testing.T) {
 
 	flushFailure := errors.New("forced flush failure")
 	prevWriteSSTableFn := writeSSTableFn
-	writeSSTableFn = func(string, memtable.Memtable, int) (*sstable.Reader, error) {
-		return nil, flushFailure
+	writeSSTableFn = func(string, memtable.Memtable, int) (sstWriteResult, error) {
+		return sstWriteResult{}, flushFailure
 	}
 	t.Cleanup(func() {
 		writeSSTableFn = prevWriteSSTableFn
@@ -893,13 +894,57 @@ func TestDB_AutoFlush_MultipleFlushes(t *testing.T) {
 	}
 }
 
-// ReopenAfterAutoFlush — data recovered from SSTables, not just WAL.
-// TODO: requires flush to write a VersionEdit to the manifest so the
-// SST is rediscovered on reopen. Currently flush touches db.ssts in
-// memory only; the manifest doesn't know the SST exists, so replay
-// can't restore it.
+// ReopenAfterAutoFlush — data recovered from SSTables, not just WAL. After
+// auto-flush plus an explicit final flush, the active memtable is empty and
+// every key lives in an SST tracked by the manifest. Deleting the WAL before
+// reopen proves recovery comes from the manifest+SSTs.
 func TestDB_AutoFlush_ReopenAfterAutoFlush(t *testing.T) {
-	t.Skip("TODO: requires flush to record an AddFile VersionEdit per SST")
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false), WithMemtableFlushSize(256))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	known := []string{"alpha", "beta", "gamma"}
+	for _, k := range known {
+		if err := db.Put(ctx, []byte(k), []byte("val-"+k)); err != nil {
+			t.Fatalf("Put(%s): %v", k, err)
+		}
+	}
+	// Drive several auto-flushes, then flush the remainder so nothing is
+	// left in the active memtable.
+	writeNBytes(ctx, t, db, 1024)
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Remove the WAL so recovery must come from the SSTs via the manifest.
+	if err := os.Remove(filepath.Join(dir, walFileName)); err != nil {
+		t.Fatalf("removing WAL: %v", err)
+	}
+
+	db2, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer db2.Close()
+
+	if len(db2.version.AllFiles()) == 0 {
+		t.Fatal("no SSTs in Version after reopen; auto-flush did not record manifest edits")
+	}
+	for _, k := range known {
+		got, err := db2.Get(ctx, []byte(k))
+		if err != nil {
+			t.Fatalf("Get(%s) after WAL deletion: %v", k, err)
+		}
+		if string(got) != "val-"+k {
+			t.Errorf("Get(%s) = %q, want %q", k, got, "val-"+k)
+		}
+	}
 }
 
 // 6. DeletesVisibleAfterFlush — tombstone propagation across flush boundaries.
@@ -1002,8 +1047,8 @@ func TestDB_AutoFlush_FailureStopsFurtherWrites(t *testing.T) {
 
 	flushFailure := errors.New("forced auto-flush failure")
 	prevWriteSSTableFn := writeSSTableFn
-	writeSSTableFn = func(string, memtable.Memtable, int) (*sstable.Reader, error) {
-		return nil, flushFailure
+	writeSSTableFn = func(string, memtable.Memtable, int) (sstWriteResult, error) {
+		return sstWriteResult{}, flushFailure
 	}
 	t.Cleanup(func() {
 		writeSSTableFn = prevWriteSSTableFn
@@ -1193,5 +1238,166 @@ func TestDB_AutoFlush_ConcurrentReadWrite(t *testing.T) {
 				t.Fatalf("Get(%s) = %q, want %q", k, got, v)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// writeSSTable: key-range/size capture and empty-memtable guard
+// ---------------------------------------------------------------------------
+
+// writeSSTable records the smallest/largest InternalKey and the on-disk file
+// size in its result, so the flush path can build an accurate manifest edit.
+func TestWriteSSTable_CapturesKeyRangeAndSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	mem := memtable.NewSkipList()
+	mem.Put(putInternalKey("m", 5), []byte("v-m"))
+	mem.Put(putInternalKey("a", 3), []byte("v-a"))
+	mem.Put(putInternalKey("z", 7), []byte("v-z"))
+
+	res, err := writeSSTable(path, mem, 0)
+	if err != nil {
+		t.Fatalf("writeSSTable: %v", err)
+	}
+	defer res.reader.Close()
+
+	if got := string(res.smallest.UserKey); got != "a" {
+		t.Errorf("smallest.UserKey = %q, want %q", got, "a")
+	}
+	if got := string(res.largest.UserKey); got != "z" {
+		t.Errorf("largest.UserKey = %q, want %q", got, "z")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	//nolint:gosec // G115: SST file size is bounded by test fixture
+	if res.size != uint64(info.Size()) {
+		t.Errorf("size = %d, want %d (on-disk size)", res.size, info.Size())
+	}
+}
+
+// writeSSTable refuses an empty memtable: an empty flush would record a
+// zero-value key range in the manifest. It must leave no orphan SST behind.
+func TestWriteSSTable_RejectsEmptyMemtable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	_, err := writeSSTable(path, memtable.NewSkipList(), 0)
+	if !errors.Is(err, ErrFlushEmptyMemtable) {
+		t.Fatalf("writeSSTable(empty) = %v, want ErrFlushEmptyMemtable", err)
+	}
+	if dirContains(t, dir, buildSSTFileName(1)) {
+		t.Errorf("empty flush left an orphan SST file on disk")
+	}
+}
+
+// A single-entry memtable is the boundary where the first key is also the
+// last: smallest and largest must both be that key, full InternalKey (seqno
+// and kind) included, not just the user key.
+func TestWriteSSTable_SingleKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	mem := memtable.NewSkipList()
+	mem.Put(putInternalKey("solo", 9), []byte("only"))
+
+	res, err := writeSSTable(path, mem, 0)
+	if err != nil {
+		t.Fatalf("writeSSTable: %v", err)
+	}
+	defer res.reader.Close()
+
+	if string(res.smallest.UserKey) != "solo" || string(res.largest.UserKey) != "solo" {
+		t.Errorf("single-key range: smallest=%q largest=%q, want both %q",
+			res.smallest.UserKey, res.largest.UserKey, "solo")
+	}
+	if res.smallest.Seqno != 9 || res.largest.Seqno != 9 {
+		t.Errorf("boundary seqno: smallest=%d largest=%d, want 9", res.smallest.Seqno, res.largest.Seqno)
+	}
+}
+
+// Two entries share a user key but differ by sequence number. InternalKey
+// ordering is user key ascending then seqno descending, so the boundary keys
+// carry the same user key with different seqnos — the capture must preserve
+// the full InternalKey, not collapse to the user key.
+func TestWriteSSTable_DuplicateUserKey_DifferentSeqno(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	mem := memtable.NewSkipList()
+	mem.Put(putInternalKey("dup", 5), []byte("newer"))
+	mem.Put(putInternalKey("dup", 3), []byte("older"))
+
+	res, err := writeSSTable(path, mem, 0)
+	if err != nil {
+		t.Fatalf("writeSSTable: %v", err)
+	}
+	defer res.reader.Close()
+
+	if string(res.smallest.UserKey) != "dup" || string(res.largest.UserKey) != "dup" {
+		t.Errorf("user keys: smallest=%q largest=%q, want both %q",
+			res.smallest.UserKey, res.largest.UserKey, "dup")
+	}
+	// Higher seqno sorts first (smallest), lower seqno sorts last (largest).
+	if res.smallest.Seqno != 5 {
+		t.Errorf("smallest.Seqno = %d, want 5", res.smallest.Seqno)
+	}
+	if res.largest.Seqno != 3 {
+		t.Errorf("largest.Seqno = %d, want 3", res.largest.Seqno)
+	}
+}
+
+// A tombstone (Delete-kind entry) can be a range boundary. The captured
+// largest key must preserve the Delete kind so the manifest range reflects it.
+func TestWriteSSTable_TombstoneBoundary(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	mem := memtable.NewSkipList()
+	mem.Put(putInternalKey("apple", 1), []byte("v"))
+	mem.Put(keys.InternalKey{UserKey: []byte("zebra"), Seqno: 2, Kind: keys.InternalKeyKindDelete}, nil)
+
+	res, err := writeSSTable(path, mem, 0)
+	if err != nil {
+		t.Fatalf("writeSSTable: %v", err)
+	}
+	defer res.reader.Close()
+
+	if string(res.smallest.UserKey) != "apple" {
+		t.Errorf("smallest.UserKey = %q, want %q", res.smallest.UserKey, "apple")
+	}
+	if string(res.largest.UserKey) != "zebra" {
+		t.Errorf("largest.UserKey = %q, want %q", res.largest.UserKey, "zebra")
+	}
+	if res.largest.Kind != keys.InternalKeyKindDelete {
+		t.Errorf("largest.Kind = %d, want Delete (%d) preserved in boundary",
+			res.largest.Kind, keys.InternalKeyKindDelete)
+	}
+}
+
+// An empty user key is valid and sorts before any non-empty key, so it must be
+// captured as the smallest boundary.
+func TestWriteSSTable_EmptyUserKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	mem := memtable.NewSkipList()
+	mem.Put(putInternalKey("", 1), []byte("empty-key-val"))
+	mem.Put(putInternalKey("b", 2), []byte("v"))
+
+	res, err := writeSSTable(path, mem, 0)
+	if err != nil {
+		t.Fatalf("writeSSTable: %v", err)
+	}
+	defer res.reader.Close()
+
+	if len(res.smallest.UserKey) != 0 {
+		t.Errorf("smallest.UserKey = %q, want empty", res.smallest.UserKey)
+	}
+	if string(res.largest.UserKey) != "b" {
+		t.Errorf("largest.UserKey = %q, want %q", res.largest.UserKey, "b")
 	}
 }

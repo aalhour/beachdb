@@ -29,4 +29,8 @@ var (
 
 	// ErrInvalidSSTBlockSize indicates that the SSTable block size is invalid.
 	ErrInvalidSSTBlockSize = errors.New("beachdb: invalid SSTable block size, must be >= 0")
+
+	// ErrFlushEmptyMemtable indicates an attempt to flush an empty memtable,
+	// which would record a zero-value key range in the manifest.
+	ErrFlushEmptyMemtable = errors.New("beachdb: refusing to flush empty memtable")
 )
