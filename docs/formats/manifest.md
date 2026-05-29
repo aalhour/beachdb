@@ -101,7 +101,7 @@ Offset  Hex                          Meaning
 52..56  7A 65 62 72 61               largestKey bytes = "zebra"
 ```
 
-Total body: 57 bytes. Wrapped by the 12-byte record header, the on-disk record is 69 bytes.
+Total body: 57 bytes. Wrapped by the 18-byte record header, the on-disk record is 75 bytes.
 
 ### Deterministic emit order
 
