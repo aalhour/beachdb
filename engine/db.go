@@ -924,6 +924,38 @@ func openSSTReadersForVersion(dir string, version *manifest.Version) ([]*sstable
 	return readers, nil
 }
 
+// cleanupOrphanSSTables removes canonical SSTable files that exist on disk
+// but are not referenced by the manifest Version. Orphan cleanup is
+// best-effort: the manifest is still the source of truth, so a deletion
+// failure leaves a harmless file behind for a future Open to try again.
+func cleanupOrphanSSTables(dir string, version *manifest.Version) {
+	referenced := make(map[uint64]struct{})
+	for _, fm := range version.AllFiles() {
+		referenced[fm.FileID] = struct{}{}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		fileID, ok := parseSSTFileName(entry.Name())
+		if !ok {
+			continue
+		}
+		if _, exists := referenced[fileID]; exists {
+			continue
+		}
+
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
+}
+
 func replayExistingManifest(db *DB, current string) error {
 	manifestPath := filepath.Join(db.dir, current)
 
@@ -948,6 +980,8 @@ func replayExistingManifest(db *DB, current string) error {
 			return fmt.Errorf("beachdb: truncating manifest tail at %d: %w", res.validOffset, err)
 		}
 	}
+
+	cleanupOrphanSSTables(db.dir, res.version)
 
 	ssts, err := openSSTReadersForVersion(db.dir, res.version)
 	if err != nil {
@@ -1108,6 +1142,30 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (sstWriteRe
 // e.g.: 1 --> 000001.sst
 func buildSSTFileName(id uint64) string {
 	return fmt.Sprintf("%0*d%s", sstableFileIDWidth, id, sstableFileExt)
+}
+
+// parseSSTFileName extracts the file ID from a canonical BeachDB SSTable
+// filename. Non-canonical names are ignored by orphan cleanup.
+func parseSSTFileName(name string) (uint64, bool) {
+	if filepath.Ext(name) != sstableFileExt {
+		return 0, false
+	}
+
+	idStr := strings.TrimSuffix(name, sstableFileExt)
+	if len(idStr) != sstableFileIDWidth {
+		return 0, false
+	}
+	for _, ch := range idStr {
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+	}
+
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
 }
 
 // buildManifestFileName builds a MANIFEST filename from a file ID,

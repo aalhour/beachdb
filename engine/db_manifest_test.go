@@ -139,6 +139,71 @@ func createRealSST(t *testing.T, dir string, fileID uint64) uint64 {
 	return uint64(info.Size())
 }
 
+func TestCleanupOrphanSSTables_RemovesOnlyUnreferencedCanonicalSSTables(t *testing.T) {
+	dir := t.TempDir()
+
+	referencedFiles := []string{buildSSTFileName(1), buildSSTFileName(3)}
+	for _, name := range referencedFiles {
+		writeFile(t, filepath.Join(dir, name), []byte("referenced"))
+	}
+
+	orphanName := buildSSTFileName(2)
+	writeFile(t, filepath.Join(dir, orphanName), []byte("orphan"))
+
+	// Hit the non-removal branches too: directory entries are skipped,
+	// non-canonical SST-looking names are ignored, and non-SST database files
+	// are not touched by cleanup.
+	orphanDirName := buildSSTFileName(4)
+	if err := os.Mkdir(filepath.Join(dir, orphanDirName), 0700); err != nil {
+		t.Fatalf("Mkdir(%q): %v", orphanDirName, err)
+	}
+	ignoredFiles := []string{
+		"0001.sst",
+		"not-a-number.sst",
+		"CURRENT",
+		"MANIFEST-000001",
+		walFileName,
+	}
+	for _, name := range ignoredFiles {
+		writeFile(t, filepath.Join(dir, name), []byte("ignored"))
+	}
+
+	version := manifest.NewVersion(0).Apply(&manifest.VersionEdit{
+		AddedFiles: []manifest.FileMetadata{
+			fileMetaFixture(0, 1, 100, "a", "m"),
+			fileMetaFixture(0, 3, 100, "n", "z"),
+		},
+	})
+
+	cleanupOrphanSSTables(dir, version)
+
+	if dirContains(t, dir, orphanName) {
+		t.Errorf("orphan SST %s still exists", orphanName)
+	}
+	for _, name := range referencedFiles {
+		if !dirContains(t, dir, name) {
+			t.Errorf("referenced SST %s was removed", name)
+		}
+	}
+	if !dirContains(t, dir, orphanDirName) {
+		t.Errorf("directory entry %s was removed", orphanDirName)
+	}
+	for _, name := range ignoredFiles {
+		if !dirContains(t, dir, name) {
+			t.Errorf("ignored file %s was removed", name)
+		}
+	}
+}
+
+func TestCleanupOrphanSSTables_MissingDirIsBestEffort(t *testing.T) {
+	missingDir := filepath.Join(t.TempDir(), "missing")
+
+	// Best-effort cleanup must not turn a transient ReadDir failure into an
+	// Open failure. The manifest replay path still treats missing referenced
+	// SSTables as hard errors separately.
+	cleanupOrphanSSTables(missingDir, manifest.NewVersion(0))
+}
+
 // appendEditsToManifest opens the existing manifest file via Writer and
 // appends each edit in order. Caller is responsible for the file already
 // existing.
@@ -908,6 +973,75 @@ func TestFlush_ManifestAppendFailure_SSTOrphaned(t *testing.T) {
 	}
 	if !dirContains(t, dir, buildSSTFileName(prevSSTID)) {
 		t.Errorf("expected orphan SST %s on disk", buildSSTFileName(prevSSTID))
+	}
+}
+
+// On Open, the manifest is authoritative: any canonical SSTable file not
+// referenced by the replayed Version is an orphan and gets removed before the
+// next file allocation can reuse that ID.
+func TestOpen_CleansUpOrphanSSTables(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := db.Put(ctx, []byte("stable"), []byte("from-sst")); err != nil {
+		t.Fatalf("Put(stable): %v", err)
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Remove the WAL so reopen is forced to recover the key from the
+	// manifest-tracked SSTable, then plant a junk canonical SSTable at the
+	// next ID. This is the crash-after-SST-sync/before-manifest-append shape.
+	if err := os.Remove(filepath.Join(dir, walFileName)); err != nil {
+		t.Fatalf("removing WAL: %v", err)
+	}
+	orphanName := buildSSTFileName(2)
+	writeFile(t, filepath.Join(dir, orphanName), []byte("partial-orphan"))
+
+	db2, err := Open(dir, WithSync(false))
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer db2.Close()
+
+	if dirContains(t, dir, orphanName) {
+		t.Errorf("orphan SST %s still exists after Open", orphanName)
+	}
+	if got := len(db2.version.AllFiles()); got != 1 {
+		t.Fatalf("Version.AllFiles() = %d files, want 1 manifest-referenced file", got)
+	}
+	if got := len(db2.ssts); got != 1 {
+		t.Fatalf("db.ssts = %d readers, want 1 manifest-referenced reader", got)
+	}
+	val, err := db2.Get(ctx, []byte("stable"))
+	if err != nil {
+		t.Fatalf("Get(stable): %v", err)
+	}
+	if string(val) != "from-sst" {
+		t.Fatalf("Get(stable) = %q, want %q", val, "from-sst")
+	}
+	if db2.nextSSTID != 2 {
+		t.Fatalf("nextSSTID after cleanup = %d, want 2", db2.nextSSTID)
+	}
+
+	if err := db2.Put(ctx, []byte("after-cleanup"), []byte("new-sst")); err != nil {
+		t.Fatalf("Put(after-cleanup): %v", err)
+	}
+	if err := db2.Flush(); err != nil {
+		t.Fatalf("Flush after cleanup: %v", err)
+	}
+	if !dirContains(t, dir, orphanName) {
+		t.Errorf("expected new SST %s to reuse the cleaned orphan ID", orphanName)
+	}
+	if got := len(db2.version.AllFiles()); got != 2 {
+		t.Errorf("Version.AllFiles() = %d files, want 2 after second flush", got)
 	}
 }
 

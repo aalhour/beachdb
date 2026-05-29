@@ -60,6 +60,69 @@ func TestBuildSSTFileName(t *testing.T) {
 	}
 }
 
+func TestParseSSTFileName(t *testing.T) {
+	tests := []struct {
+		name   string
+		wantID uint64
+		wantOK bool
+	}{
+		{
+			name:   "00000000000000000000.sst",
+			wantID: 0,
+			wantOK: true,
+		},
+		{
+			name:   "00000000000000000001.sst",
+			wantID: 1,
+			wantOK: true,
+		},
+		{
+			name:   "00000000000000000042.sst",
+			wantID: 42,
+			wantOK: true,
+		},
+		{
+			name:   "18446744073709551615.sst",
+			wantID: ^uint64(0),
+			wantOK: true,
+		},
+		{
+			name:   "00000000000000000001.wal",
+			wantOK: false,
+		},
+		{
+			name:   "0000000000000000001.sst",
+			wantOK: false,
+		},
+		{
+			name:   "000000000000000000001.sst",
+			wantOK: false,
+		},
+		{
+			name:   "00000000000000000x01.sst",
+			wantOK: false,
+		},
+		{
+			name:   "99999999999999999999.sst",
+			wantOK: false,
+		},
+		{
+			name:   "CURRENT",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		gotID, gotOK := parseSSTFileName(tt.name)
+		if gotOK != tt.wantOK {
+			t.Errorf("parseSSTFileName(%q) ok = %v, want %v", tt.name, gotOK, tt.wantOK)
+		}
+		if gotID != tt.wantID {
+			t.Errorf("parseSSTFileName(%q) id = %d, want %d", tt.name, gotID, tt.wantID)
+		}
+	}
+}
+
 // Close should close all SSTable readers
 func TestDB_CloseClosesSSTReaders(t *testing.T) {
 	dir := t.TempDir()
