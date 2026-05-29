@@ -48,9 +48,11 @@ A MANIFEST file is a sequence of records. The framing is the same as the [WAL re
 | `checksum` | CRC32C of payload | CRC32C of payload |
 | `payload` | encoded `Batch` | encoded `VersionEdit` |
 
-Different magic byte means `wal_dump` cleanly rejects a manifest file and vice versa.
+Different magic bytes mean `wal_dump` cleanly rejects a manifest file and vice versa.
 
-The header is 12 bytes. The payload is the encoded `VersionEdit` described below.
+The header is 18 bytes: 8-byte magic, 1-byte version, 1-byte record type,
+4-byte payload length, and 4-byte checksum. The payload is the encoded
+`VersionEdit` described below.
 
 ---
 
@@ -175,7 +177,7 @@ A crash at any step leaves either the old CURRENT intact or the new CURRENT full
 
 A truncated last record means the process crashed mid-write to the manifest:
 
-- **Truncated header** (< 12 bytes): ignore, treat as EOF, truncate the file back to the last valid offset.
+- **Truncated header** (< 18 bytes): ignore, treat as EOF, truncate the file back to the last valid offset.
 - **Truncated payload** (header valid, payload incomplete): ignore, treat as EOF, truncate.
 
 The incomplete edit was never `fsync`'d, so it never took effect from the database's perspective. Discarding it is correct.
