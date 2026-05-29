@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aalhour/beachdb/internal/keys"
 	"github.com/aalhour/beachdb/internal/memtable"
 	"github.com/aalhour/beachdb/internal/sstable"
 )
@@ -29,125 +30,16 @@ func TestDB_OpenWithNoSSTables(t *testing.T) {
 	if len(db.ssts) != 0 {
 		t.Fatalf("expected 0 SSTable readers on fresh DB, got %d", len(db.ssts))
 	}
-	if db.nextSSTID != 0 {
-		t.Fatalf("expected nextSSTID=0 on fresh DB, got %d", db.nextSSTID)
+	if db.nextSSTID != 1 {
+		t.Fatalf("expected nextSSTID=1 on fresh DB (bootstrap reserves ID 0 as sentinel), got %d", db.nextSSTID)
 	}
 }
 
-// Spec: "create SST files manually, open DB, verify they are loaded"
-func TestDB_DiscoverSSTables(t *testing.T) {
-	dir := t.TempDir()
-
-	// Create a DB, write entries, flush to produce SSTable files
-	db, err := Open(dir, WithSync(false))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	ctx := context.Background()
-	for i := range 10 {
-		if err := db.Put(ctx, fmt.Appendf(nil, "key-%04d", i), fmt.Appendf(nil, "val-%04d", i)); err != nil {
-			t.Fatalf("Put: %v", err)
-		}
-	}
-	if err := db.flushMemtable(); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	db.Close()
-
-	// Verify the SST file exists on disk
-	matches, err := filepath.Glob(filepath.Join(dir, "*.sst"))
-	if err != nil {
-		t.Fatalf("Glob: %v", err)
-	}
-	if len(matches) != 1 {
-		t.Fatalf("expected 1 SST file, got %d", len(matches))
-	}
-
-	// Re-open the DB — it should discover the SSTable
-	db2, err := Open(dir, WithSync(false))
-	if err != nil {
-		t.Fatalf("re-Open: %v", err)
-	}
-	defer db2.Close()
-
-	if len(db2.ssts) != 1 {
-		t.Fatalf("expected 1 SSTable reader after re-open, got %d", len(db2.ssts))
-	}
-	if db2.nextSSTID != 1 {
-		t.Fatalf("expected nextSSTID=1, got %d", db2.nextSSTID)
-	}
-}
-
-func TestDB_DiscoverMultipleSSTables(t *testing.T) {
-	dir := t.TempDir()
-
-	db, err := Open(dir, WithSync(false))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	ctx := context.Background()
-
-	// Flush 3 times to produce 3 SSTable files
-	for batch := range 3 {
-		for i := range 5 {
-			key := fmt.Appendf(nil, "batch%d-key%d", batch, i)
-			val := fmt.Appendf(nil, "batch%d-val%d", batch, i)
-			if err := db.Put(ctx, key, val); err != nil {
-				t.Fatalf("Put: %v", err)
-			}
-		}
-		if err := db.flushMemtable(); err != nil {
-			t.Fatalf("flush %d: %v", batch, err)
-		}
-	}
-	db.Close()
-
-	// Verify 3 SST files on disk
-	matches, err := filepath.Glob(filepath.Join(dir, "*.sst"))
-	if err != nil {
-		t.Fatalf("Glob: %v", err)
-	}
-	if len(matches) != 3 {
-		t.Fatalf("expected 3 SST files, got %d", len(matches))
-	}
-
-	// Re-open and verify
-	db2, err := Open(dir, WithSync(false))
-	if err != nil {
-		t.Fatalf("re-Open: %v", err)
-	}
-	defer db2.Close()
-
-	if len(db2.ssts) != 3 {
-		t.Fatalf("expected 3 SSTable readers, got %d", len(db2.ssts))
-	}
-	if db2.nextSSTID != 3 {
-		t.Fatalf("expected nextSSTID=3, got %d", db2.nextSSTID)
-	}
-}
-
-// Non-SST files in the directory should be ignored
-func TestDB_DiscoverIgnoresNonSSTFiles(t *testing.T) {
-	dir := t.TempDir()
-
-	// Create some non-SST files
-	for _, name := range []string{"notes.txt", "backup.bak", "data.log"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("junk"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	files, nextID, err := discoverSSTables(dir)
-	if err != nil {
-		t.Fatalf("discoverSSTables: %v", err)
-	}
-	if len(files) != 0 {
-		t.Fatalf("expected 0 SST files, got %d: %v", len(files), files)
-	}
-	if nextID != 0 {
-		t.Fatalf("expected nextID=0, got %d", nextID)
-	}
-}
+// Filesystem-discovery tests (TestDB_DiscoverSSTables and friends) were
+// removed because the manifest is now the source of truth for which
+// SSTables exist; the engine no longer walks the directory to find them.
+// SST loading behavior is now covered in engine/db_manifest_test.go via
+// TestOpen_Manifest_HappyPath and the bootstrap/replay tests there.
 
 // buildSSTFileName produces the expected zero-padded format
 func TestBuildSSTFileName(t *testing.T) {
@@ -164,6 +56,69 @@ func TestBuildSSTFileName(t *testing.T) {
 		got := buildSSTFileName(tt.id)
 		if got != tt.want {
 			t.Errorf("buildSSTFileName(%d) = %q, want %q", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestParseSSTFileName(t *testing.T) {
+	tests := []struct {
+		name   string
+		wantID uint64
+		wantOK bool
+	}{
+		{
+			name:   "00000000000000000000.sst",
+			wantID: 0,
+			wantOK: true,
+		},
+		{
+			name:   "00000000000000000001.sst",
+			wantID: 1,
+			wantOK: true,
+		},
+		{
+			name:   "00000000000000000042.sst",
+			wantID: 42,
+			wantOK: true,
+		},
+		{
+			name:   "18446744073709551615.sst",
+			wantID: ^uint64(0),
+			wantOK: true,
+		},
+		{
+			name:   "00000000000000000001.wal",
+			wantOK: false,
+		},
+		{
+			name:   "0000000000000000001.sst",
+			wantOK: false,
+		},
+		{
+			name:   "000000000000000000001.sst",
+			wantOK: false,
+		},
+		{
+			name:   "00000000000000000x01.sst",
+			wantOK: false,
+		},
+		{
+			name:   "99999999999999999999.sst",
+			wantOK: false,
+		},
+		{
+			name:   "CURRENT",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		gotID, gotOK := parseSSTFileName(tt.name)
+		if gotOK != tt.wantOK {
+			t.Errorf("parseSSTFileName(%q) ok = %v, want %v", tt.name, gotOK, tt.wantOK)
+		}
+		if gotID != tt.wantID {
+			t.Errorf("parseSSTFileName(%q) id = %d, want %d", tt.name, gotID, tt.wantID)
 		}
 	}
 }
@@ -248,8 +203,9 @@ func TestFlush_ProducesValidSSTable(t *testing.T) {
 		t.Fatalf("flushMemtable: %v", err)
 	}
 
-	// SST file should exist on disk
-	sstPath := filepath.Join(dir, buildSSTFileName(0))
+	// SST file should exist on disk. The first allocated file ID is 1 —
+	// 0 is reserved as the "unallocated" sentinel.
+	sstPath := filepath.Join(dir, buildSSTFileName(1))
 	if _, err := os.Stat(sstPath); err != nil {
 		t.Fatalf("SST file not found: %v", err)
 	}
@@ -349,16 +305,17 @@ func TestFlush_IncrementsSSTID(t *testing.T) {
 		}
 	}
 
-	if db.nextSSTID != 3 {
-		t.Fatalf("expected nextSSTID=3 after 3 flushes, got %d", db.nextSSTID)
+	// File IDs start at 1 (bootstrap reserves 0 as sentinel), so after
+	// 3 flushes db.nextSSTID is 4 and files 1..3 exist on disk.
+	if db.nextSSTID != 4 {
+		t.Fatalf("expected nextSSTID=4 after 3 flushes, got %d", db.nextSSTID)
 	}
 	if len(db.ssts) != 3 {
 		t.Fatalf("expected 3 readers, got %d", len(db.ssts))
 	}
 
-	// Verify filenames on disk
-	for i := range 3 {
-		sstPath := filepath.Join(dir, buildSSTFileName(uint64(i)))
+	for i := uint64(1); i <= 3; i++ {
+		sstPath := filepath.Join(dir, buildSSTFileName(i))
 		if _, err := os.Stat(sstPath); err != nil {
 			t.Fatalf("expected %s to exist: %v", sstPath, err)
 		}
@@ -447,8 +404,8 @@ func TestFlush_SynchronousFailurePreservesReadableData(t *testing.T) {
 
 	flushFailure := errors.New("forced flush failure")
 	prevWriteSSTableFn := writeSSTableFn
-	writeSSTableFn = func(string, memtable.Memtable, int) (*sstable.Reader, error) {
-		return nil, flushFailure
+	writeSSTableFn = func(string, memtable.Memtable, int) (sstWriteResult, error) {
+		return sstWriteResult{}, flushFailure
 	}
 	t.Cleanup(func() {
 		writeSSTableFn = prevWriteSSTableFn
@@ -470,8 +427,8 @@ func TestFlush_SynchronousFailurePreservesReadableData(t *testing.T) {
 	if len(db.ssts) != 0 {
 		t.Fatalf("expected no SSTs to be published on failed flush, got %d", len(db.ssts))
 	}
-	if db.nextSSTID != 0 {
-		t.Fatalf("expected nextSSTID to stay at 0 after failed flush, got %d", db.nextSSTID)
+	if db.nextSSTID != 1 {
+		t.Fatalf("expected nextSSTID to stay at 1 after failed flush (no successful publish), got %d", db.nextSSTID)
 	}
 	if db.immMem == nil {
 		t.Fatal("expected failed synchronous flush to keep the frozen memtable readable")
@@ -513,9 +470,9 @@ func TestFlush_MultipleFlushes(t *testing.T) {
 		t.Fatalf("expected 5 readers, got %d", len(db.ssts))
 	}
 
-	// Each SST should be independently openable
-	for i := range 5 {
-		path := filepath.Join(dir, buildSSTFileName(uint64(i)))
+	// Each SST should be independently openable. File IDs start at 1.
+	for i := uint64(1); i <= 5; i++ {
+		path := filepath.Join(dir, buildSSTFileName(i))
 		f, err := os.Open(path) //nolint:gosec // test with known temp path
 		if err != nil {
 			t.Fatalf("Open SST %d: %v", i, err)
@@ -544,125 +501,9 @@ func TestFlush_OnClosedDB(t *testing.T) {
 	_ = db.flushMemtable()
 }
 
-// --- discoverSSTables unit tests ---
-
-func TestDiscoverSSTables_SortOrder(t *testing.T) {
-	dir := t.TempDir()
-
-	// Create SST files out of order
-	names := []string{"000003.sst", "000001.sst", "000002.sst"}
-	for _, name := range names {
-		path := filepath.Join(dir, name)
-		// Write a valid (empty) SSTable
-		f, err := os.Create(path) //nolint:gosec // test with known temp path
-		if err != nil {
-			t.Fatal(err)
-		}
-		w, err := sstable.NewWriter(f, sstable.WithSync(false))
-		if err != nil {
-			t.Fatal(err)
-		}
-		w.Close()
-	}
-
-	files, nextID, err := discoverSSTables(dir)
-	if err != nil {
-		t.Fatalf("discoverSSTables: %v", err)
-	}
-
-	// Should be sorted ASC
-	expected := []string{"000001.sst", "000002.sst", "000003.sst"}
-	if !slices.Equal(files, expected) {
-		t.Fatalf("expected %v, got %v", expected, files)
-	}
-	if nextID != 4 {
-		t.Fatalf("expected nextID=4, got %d", nextID)
-	}
-}
-
-func TestDiscoverSSTables_EmptyDir(t *testing.T) {
-	dir := t.TempDir()
-
-	files, nextID, err := discoverSSTables(dir)
-	if err != nil {
-		t.Fatalf("discoverSSTables: %v", err)
-	}
-	if len(files) != 0 {
-		t.Fatalf("expected 0 files, got %d", len(files))
-	}
-	if nextID != 0 {
-		t.Fatalf("expected nextID=0, got %d", nextID)
-	}
-}
-
-func TestDiscoverSSTables_RejectsMalformedName(t *testing.T) {
-	dir := t.TempDir()
-
-	if err := os.WriteFile(filepath.Join(dir, "not-a-number.sst"), []byte("junk"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	_, _, err := discoverSSTables(dir)
-	if err == nil {
-		t.Fatal("expected malformed SSTable name to fail discovery")
-	}
-}
-
-func TestDiscoverSSTables_SortsByNumericID(t *testing.T) {
-	dir := t.TempDir()
-
-	for _, name := range []string{"10.sst", "2.sst", "000001.sst"} {
-		path := filepath.Join(dir, name)
-		f, err := os.Create(path) //nolint:gosec // test with known temp path
-		if err != nil {
-			t.Fatal(err)
-		}
-		w, err := sstable.NewWriter(f, sstable.WithSync(false))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	files, nextID, err := discoverSSTables(dir)
-	if err != nil {
-		t.Fatalf("discoverSSTables: %v", err)
-	}
-
-	expected := []string{"000001.sst", "2.sst", "10.sst"}
-	if !slices.Equal(files, expected) {
-		t.Fatalf("expected %v, got %v", expected, files)
-	}
-	if nextID != 11 {
-		t.Fatalf("expected nextID=11, got %d", nextID)
-	}
-}
-
-func TestDiscoverSSTables_RejectsDuplicateNumericID(t *testing.T) {
-	dir := t.TempDir()
-
-	for _, name := range []string{"1.sst", "000001.sst"} {
-		path := filepath.Join(dir, name)
-		f, err := os.Create(path) //nolint:gosec // test with known temp path
-		if err != nil {
-			t.Fatal(err)
-		}
-		w, err := sstable.NewWriter(f, sstable.WithSync(false))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	_, _, err := discoverSSTables(dir)
-	if err == nil {
-		t.Fatal("expected duplicate numeric SSTable IDs to fail discovery")
-	}
-}
+// discoverSSTables unit tests were removed alongside the helper itself.
+// The manifest's FileID → SST filename mapping replaces filesystem
+// discovery; filename validation happens implicitly through that mapping.
 
 // --- Get reads from SSTables + flush integration ---
 
@@ -1116,43 +957,56 @@ func TestDB_AutoFlush_MultipleFlushes(t *testing.T) {
 	}
 }
 
-// 5. ReopenAfterAutoFlush — data recovered from SSTables, not just WAL.
+// ReopenAfterAutoFlush — data recovered from SSTables, not just WAL. After
+// auto-flush plus an explicit final flush, the active memtable is empty and
+// every key lives in an SST tracked by the manifest. Deleting the WAL before
+// reopen proves recovery comes from the manifest+SSTs.
 func TestDB_AutoFlush_ReopenAfterAutoFlush(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Open(dir, WithSync(false), WithMemtableFlushSize(512))
+	db, err := Open(dir, WithSync(false), WithMemtableFlushSize(256))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
+
+	known := []string{"alpha", "beta", "gamma"}
+	for _, k := range known {
+		if err := db.Put(ctx, []byte(k), []byte("val-"+k)); err != nil {
+			t.Fatalf("Put(%s): %v", k, err)
+		}
+	}
+	// Drive several auto-flushes, then flush the remainder so nothing is
+	// left in the active memtable.
 	writeNBytes(ctx, t, db, 1024)
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Verify SST files exist before reopen
-	sstCount := countSSTFiles(t, dir)
-	if sstCount < 1 {
-		t.Fatalf("expected SST files after flush, got %d", sstCount)
+	// Remove the WAL so recovery must come from the SSTs via the manifest.
+	if err := os.Remove(filepath.Join(dir, walFileName)); err != nil {
+		t.Fatalf("removing WAL: %v", err)
 	}
 
-	// Reopen — data should load from SSTables
 	db2, err := Open(dir, WithSync(false))
 	if err != nil {
 		t.Fatalf("Reopen: %v", err)
 	}
 	defer db2.Close()
 
-	if len(db2.ssts) < 1 {
-		t.Fatalf("expected SSTable readers after reopen, got %d", len(db2.ssts))
+	if len(db2.version.AllFiles()) == 0 {
+		t.Fatal("no SSTs in Version after reopen; auto-flush did not record manifest edits")
 	}
-
-	// Spot-check a key
-	val, err := db2.Get(ctx, []byte("key-000000"))
-	if err != nil {
-		t.Fatalf("Get(key-000000): %v", err)
-	}
-	if string(val) != "value-000000" {
-		t.Fatalf("Get(key-000000) = %q, want %q", val, "value-000000")
+	for _, k := range known {
+		got, err := db2.Get(ctx, []byte(k))
+		if err != nil {
+			t.Fatalf("Get(%s) after WAL deletion: %v", k, err)
+		}
+		if string(got) != "val-"+k {
+			t.Errorf("Get(%s) = %q, want %q", k, got, "val-"+k)
+		}
 	}
 }
 
@@ -1256,8 +1110,8 @@ func TestDB_AutoFlush_FailureStopsFurtherWrites(t *testing.T) {
 
 	flushFailure := errors.New("forced auto-flush failure")
 	prevWriteSSTableFn := writeSSTableFn
-	writeSSTableFn = func(string, memtable.Memtable, int) (*sstable.Reader, error) {
-		return nil, flushFailure
+	writeSSTableFn = func(string, memtable.Memtable, int) (sstWriteResult, error) {
+		return sstWriteResult{}, flushFailure
 	}
 	t.Cleanup(func() {
 		writeSSTableFn = prevWriteSSTableFn
@@ -1447,5 +1301,166 @@ func TestDB_AutoFlush_ConcurrentReadWrite(t *testing.T) {
 				t.Fatalf("Get(%s) = %q, want %q", k, got, v)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// writeSSTable: key-range/size capture and empty-memtable guard
+// ---------------------------------------------------------------------------
+
+// writeSSTable records the smallest/largest InternalKey and the on-disk file
+// size in its result, so the flush path can build an accurate manifest edit.
+func TestWriteSSTable_CapturesKeyRangeAndSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	mem := memtable.NewSkipList()
+	mem.Put(putInternalKey("m", 5), []byte("v-m"))
+	mem.Put(putInternalKey("a", 3), []byte("v-a"))
+	mem.Put(putInternalKey("z", 7), []byte("v-z"))
+
+	res, err := writeSSTable(path, mem, 0)
+	if err != nil {
+		t.Fatalf("writeSSTable: %v", err)
+	}
+	defer res.reader.Close()
+
+	if got := string(res.smallest.UserKey); got != "a" {
+		t.Errorf("smallest.UserKey = %q, want %q", got, "a")
+	}
+	if got := string(res.largest.UserKey); got != "z" {
+		t.Errorf("largest.UserKey = %q, want %q", got, "z")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	//nolint:gosec // G115: SST file size is bounded by test fixture
+	if res.size != uint64(info.Size()) {
+		t.Errorf("size = %d, want %d (on-disk size)", res.size, info.Size())
+	}
+}
+
+// writeSSTable refuses an empty memtable: an empty flush would record a
+// zero-value key range in the manifest. It must leave no orphan SST behind.
+func TestWriteSSTable_RejectsEmptyMemtable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	_, err := writeSSTable(path, memtable.NewSkipList(), 0)
+	if !errors.Is(err, ErrFlushEmptyMemtable) {
+		t.Fatalf("writeSSTable(empty) = %v, want ErrFlushEmptyMemtable", err)
+	}
+	if dirContains(t, dir, buildSSTFileName(1)) {
+		t.Errorf("empty flush left an orphan SST file on disk")
+	}
+}
+
+// A single-entry memtable is the boundary where the first key is also the
+// last: smallest and largest must both be that key, full InternalKey (seqno
+// and kind) included, not just the user key.
+func TestWriteSSTable_SingleKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	mem := memtable.NewSkipList()
+	mem.Put(putInternalKey("solo", 9), []byte("only"))
+
+	res, err := writeSSTable(path, mem, 0)
+	if err != nil {
+		t.Fatalf("writeSSTable: %v", err)
+	}
+	defer res.reader.Close()
+
+	if string(res.smallest.UserKey) != "solo" || string(res.largest.UserKey) != "solo" {
+		t.Errorf("single-key range: smallest=%q largest=%q, want both %q",
+			res.smallest.UserKey, res.largest.UserKey, "solo")
+	}
+	if res.smallest.Seqno != 9 || res.largest.Seqno != 9 {
+		t.Errorf("boundary seqno: smallest=%d largest=%d, want 9", res.smallest.Seqno, res.largest.Seqno)
+	}
+}
+
+// Two entries share a user key but differ by sequence number. InternalKey
+// ordering is user key ascending then seqno descending, so the boundary keys
+// carry the same user key with different seqnos — the capture must preserve
+// the full InternalKey, not collapse to the user key.
+func TestWriteSSTable_DuplicateUserKey_DifferentSeqno(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	mem := memtable.NewSkipList()
+	mem.Put(putInternalKey("dup", 5), []byte("newer"))
+	mem.Put(putInternalKey("dup", 3), []byte("older"))
+
+	res, err := writeSSTable(path, mem, 0)
+	if err != nil {
+		t.Fatalf("writeSSTable: %v", err)
+	}
+	defer res.reader.Close()
+
+	if string(res.smallest.UserKey) != "dup" || string(res.largest.UserKey) != "dup" {
+		t.Errorf("user keys: smallest=%q largest=%q, want both %q",
+			res.smallest.UserKey, res.largest.UserKey, "dup")
+	}
+	// Higher seqno sorts first (smallest), lower seqno sorts last (largest).
+	if res.smallest.Seqno != 5 {
+		t.Errorf("smallest.Seqno = %d, want 5", res.smallest.Seqno)
+	}
+	if res.largest.Seqno != 3 {
+		t.Errorf("largest.Seqno = %d, want 3", res.largest.Seqno)
+	}
+}
+
+// A tombstone (Delete-kind entry) can be a range boundary. The captured
+// largest key must preserve the Delete kind so the manifest range reflects it.
+func TestWriteSSTable_TombstoneBoundary(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	mem := memtable.NewSkipList()
+	mem.Put(putInternalKey("apple", 1), []byte("v"))
+	mem.Put(keys.InternalKey{UserKey: []byte("zebra"), Seqno: 2, Kind: keys.InternalKeyKindDelete}, nil)
+
+	res, err := writeSSTable(path, mem, 0)
+	if err != nil {
+		t.Fatalf("writeSSTable: %v", err)
+	}
+	defer res.reader.Close()
+
+	if string(res.smallest.UserKey) != "apple" {
+		t.Errorf("smallest.UserKey = %q, want %q", res.smallest.UserKey, "apple")
+	}
+	if string(res.largest.UserKey) != "zebra" {
+		t.Errorf("largest.UserKey = %q, want %q", res.largest.UserKey, "zebra")
+	}
+	if res.largest.Kind != keys.InternalKeyKindDelete {
+		t.Errorf("largest.Kind = %d, want Delete (%d) preserved in boundary",
+			res.largest.Kind, keys.InternalKeyKindDelete)
+	}
+}
+
+// An empty user key is valid and sorts before any non-empty key, so it must be
+// captured as the smallest boundary.
+func TestWriteSSTable_EmptyUserKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, buildSSTFileName(1))
+
+	mem := memtable.NewSkipList()
+	mem.Put(putInternalKey("", 1), []byte("empty-key-val"))
+	mem.Put(putInternalKey("b", 2), []byte("v"))
+
+	res, err := writeSSTable(path, mem, 0)
+	if err != nil {
+		t.Fatalf("writeSSTable: %v", err)
+	}
+	defer res.reader.Close()
+
+	if len(res.smallest.UserKey) != 0 {
+		t.Errorf("smallest.UserKey = %q, want empty", res.smallest.UserKey)
+	}
+	if string(res.largest.UserKey) != "b" {
+		t.Errorf("largest.UserKey = %q, want %q", res.largest.UserKey, "b")
 	}
 }

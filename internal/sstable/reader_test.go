@@ -782,6 +782,53 @@ func TestReader_EntryCount_Empty(t *testing.T) {
 	}
 }
 
+func TestReader_FileSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "filesize.sst")
+
+	entries := []struct {
+		key   keys.InternalKey
+		value []byte
+	}{
+		{putKey("a", 3), []byte("v1")},
+		{putKey("b", 2), []byte("v2")},
+		{putKey("c", 1), []byte("v3")},
+	}
+	writeSSTable(t, path, entries)
+
+	r := openReader(t, path)
+	defer r.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := r.FileSize(); got != info.Size() {
+		t.Fatalf("FileSize() = %d, want %d (on-disk size)", got, info.Size())
+	}
+}
+
+func TestReader_FileSize_Empty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "filesize-empty.sst")
+
+	writeSSTable(t, path, nil)
+
+	r := openReader(t, path)
+	defer r.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := r.FileSize(); got != info.Size() {
+		t.Fatalf("FileSize() = %d, want %d (on-disk size)", got, info.Size())
+	}
+	if r.FileSize() <= 0 {
+		t.Errorf("FileSize() = %d, want > 0 (footer/index always present)", r.FileSize())
+	}
+}
+
 func TestReader_DataBlockCount(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocks.sst")

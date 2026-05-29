@@ -57,9 +57,9 @@
 //     until Close is called
 //
 // This means iterators block writers. It's a deliberate v1 simplicity choice —
-// the frozen-memtable pattern (Milestone 4) will route new writes to a fresh
-// memtable while the old one drains, so iterator lock contention becomes a
-// non-issue in practice.
+// the frozen-memtable flush pattern routes new writes to a fresh memtable
+// while the old one drains, so iterator lock contention becomes a non-issue
+// in practice.
 //
 // IMPORTANT: Callers MUST call Iterator.Close() to release the lock. Forgetting
 // this will deadlock writers indefinitely. The compiler won't save you here.

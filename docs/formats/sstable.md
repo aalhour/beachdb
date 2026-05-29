@@ -4,6 +4,8 @@
 
 BeachDB does **not** have user-facing "tables" yet. In this document, "SSTable" means **Sorted String Table** in the LevelDB/RocksDB sense: a sorted key-value file for the storage engine itself, not an HBase-style table abstraction.
 
+Introduced in BeachDB [v0.0.3](https://github.com/aalhour/beachdb/releases/tag/v0.0.3).
+
 ## Goals
 
 - **Immutable sorted file**: Written once, read many times.

@@ -22,6 +22,12 @@ const (
 	PointFlushAfterFileSync = "flush_after_file_sync"
 	// PointFlushAfterPublish crashes after a flushed SSTable is published in memory.
 	PointFlushAfterPublish = "flush_after_publish"
+	// PointManifestAfterSSTSync crashes after the SSTable is durable but before the manifest
+	// edit is appended.
+	PointManifestAfterSSTSync = "manifest_after_sst_sync"
+	// PointManifestAfterAppend crashes after the manifest edit is appended and synced but before
+	// the in-memory version is updated.
+	PointManifestAfterAppend = "manifest_after_append"
 
 	// FaultWALSyncError injects a deterministic WAL sync failure.
 	FaultWALSyncError = "wal_sync_error"
@@ -53,7 +59,8 @@ var (
 // IsCrashPoint reports whether point names a supported crash point.
 func IsCrashPoint(point string) bool {
 	switch point {
-	case "", PointWALAfterAppend, PointWALAfterSync, PointFlushAfterFileSync, PointFlushAfterPublish:
+	case "", PointWALAfterAppend, PointWALAfterSync, PointFlushAfterFileSync, PointFlushAfterPublish,
+		PointManifestAfterSSTSync, PointManifestAfterAppend:
 		return true
 	default:
 		return false

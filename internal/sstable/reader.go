@@ -86,6 +86,12 @@ func (r *Reader) Close() error {
 	return nil
 }
 
+// FileSize returns the SSTable file size in bytes. It returns int64 to
+// match the os file-size API (os.FileInfo.Size).
+func (r *Reader) FileSize() int64 {
+	return r.fileSize
+}
+
 // EntryCount returns the total number of key-value entries in the SSTable.
 func (r *Reader) EntryCount() uint64 {
 	return r.footer.entryCount

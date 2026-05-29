@@ -15,6 +15,7 @@ import (
 	"github.com/aalhour/beachdb/internal/crashhook"
 	"github.com/aalhour/beachdb/internal/fs"
 	"github.com/aalhour/beachdb/internal/keys"
+	"github.com/aalhour/beachdb/internal/manifest"
 	"github.com/aalhour/beachdb/internal/memtable"
 	"github.com/aalhour/beachdb/internal/record"
 	"github.com/aalhour/beachdb/internal/sstable"
@@ -30,6 +31,12 @@ const (
 
 	// sstableFileIDWidth keeps lexicographic and numeric order aligned for all uint64 IDs.
 	sstableFileIDWidth = 20
+
+	// manifestFilePrefix specifies the file name prefix for MANIFEST files.
+	manifestFilePrefix = "MANIFEST-"
+
+	// manifestFileIDWidth keeps lexicographic and numeric order aligned for all uint64 IDs.
+	manifestFileIDWidth = 6
 )
 
 var (
@@ -57,12 +64,15 @@ type DB struct {
 	cond *sync.Cond   // cond.L = &db.mu (write side only)
 
 	// Mutable state (guarded by `mu`)
-	closed bool              // Flag indicating whether db is closed or not
-	seqno  uint64            // Monotonic sequence counter
-	mem    memtable.Memtable // Memory table with recent writes
-	immMem memtable.Memtable // frozen memtable being flushed; nil when idle
-	ssts   []*sstable.Reader // Open SSTable readers, newest-last in slice
-	wal    *wal.Writer       // Writer for the Write-Ahead Log (WAL) file
+	closed   bool              // Flag indicating whether db is closed or not
+	seqno    uint64            // Monotonic sequence counter
+	logno    uint64            // TODO: new field
+	mem      memtable.Memtable // Memory table with recent writes
+	immMem   memtable.Memtable // frozen memtable being flushed; nil when idle
+	ssts     []*sstable.Reader // Open SSTable readers, newest-last in slice
+	wal      *wal.Writer       // Writer for the Write-Ahead Log (WAL) file
+	manifest *manifest.Writer  // Active manifest writer
+	version  *manifest.Version // Current in-memory version data (ssts metadata)
 
 	// SSTable flush goroutine state
 	nextSSTID   uint64        // Counter for SST file naming (new files)
@@ -70,93 +80,54 @@ type DB struct {
 	flushErr    error         // Last flush error
 }
 
-// Open initializes a DB struct and replays the WAL, if present.
+// Open initializes a DB struct, restoring state from MANIFEST + CURRENT
+// and replaying any WAL records written after the last flush. A directory
+// with no CURRENT is treated as a fresh database and bootstrapped from
+// scratch (see openManifest for the full decision tree).
 func Open(dir string, opts ...Option) (*DB, error) {
-	// Process configuration options
 	cfg := applyOptions(opts)
 
-	// Create directory for the database and fsync created directory entries.
 	if err := fs.MkdirAllAndSync(dir); err != nil {
 		return nil, err
 	}
-
-	// Validate the memtable flush threshold
 	if cfg.memtableFlushSize < 0 {
 		return nil, ErrInvalidMemtableFlushSize
 	}
-
-	// Validate the SSTable block size
 	if cfg.sstBlockSize < 0 {
 		return nil, ErrInvalidSSTBlockSize
 	}
 
-	// Initialize the DB struct
 	db := &DB{
 		dir:               dir,
 		syncOnWrite:       cfg.syncOnWrite,
 		memtableFlushSize: cfg.memtableFlushSize,
 		sstBlockSize:      cfg.sstBlockSize,
-		closed:            false,
 		mem:               memtable.NewSkipList(),
-		seqno:             0,
 	}
-
-	// Init the concurrency `cond` field for write workloads
 	db.cond = sync.NewCond(&db.mu)
 
-	// Construct the WAL file path
+	// Read CURRENT, replay manifest (or bootstrap fresh). On return,
+	// db.version, db.manifest, db.ssts, db.nextSSTID, and db.seqno
+	// are all installed from on-disk state.
+	if err := openManifest(db); err != nil {
+		return nil, err
+	}
+
 	walFilePath := filepath.Join(dir, walFileName)
 
-	// Replay the WAL if it exists
-	err := replayWAL(db, walFilePath)
-	if err != nil {
+	// WAL replay continues from db.seqno (the manifest's LastSequence).
+	if err := replayWAL(db, walFilePath); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 
-	// Create the WAL writer
-	writer, err := wal.NewWriter(walFilePath)
-	if err != nil {
-		return nil, fmt.Errorf("beachdb: creating WAL writer: %w", err)
-	}
-	db.wal = writer
-
-	// Sync the directory so the WAL file's directory entry reaches disk.
-	// Without this, a crash could leave the WAL data on disk but the
-	// directory unaware the file exists.
-	if err := fs.SyncDir(dir); err != nil {
-		// Best effort: close the writer before returning
-		_ = writer.Close()
-		return nil, err
-	}
-
-	// Discover SSTables and create readers for them
-	sortedFileNames, nextSSTID, err := discoverSSTables(dir)
+	walWriter, err := wal.NewWriter(walFilePath)
 	if err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("beachdb: error discovering SSTables, %w", err)
+		return nil, fmt.Errorf("beachdb: creating WAL writer: %w", err)
 	}
+	db.wal = walWriter
 
-	// Iterate over discovered sstable files and open readers for them
-	for _, fileName := range sortedFileNames {
-		fullPath := filepath.Join(dir, fileName)
-		sstableFile, err := os.Open(fullPath) //nolint:gosec // trusted dir + discovered filename
-		if err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("beachdb: opening SSTable %s: %w", fileName, err)
-		}
-		sstReader, err := sstable.OpenReader(sstableFile)
-		if err != nil {
-			_ = sstableFile.Close()
-			_ = db.Close()
-			return nil, fmt.Errorf("beachdb: reading SSTable %s: %w", fileName, err)
-		}
-		db.ssts = append(db.ssts, sstReader)
-	}
-
-	// Set the nextSSTID to point to the next free ID number
-	db.nextSSTID = nextSSTID
-
-	// Start the SSTable flushing goroutine only after Open succeeds.
 	if db.memtableFlushSize > 0 {
 		doneCh := make(chan struct{})
 		db.flushDoneCh = doneCh
@@ -337,11 +308,20 @@ func (db *DB) Close() error {
 		firstError = err
 	}
 
+	// Close the manifest file writer
+	if db.manifest != nil {
+		if err := db.manifest.Close(); err != nil && firstError == nil {
+			firstError = err
+		}
+		db.manifest = nil
+	}
+
 	// Mark it as closed
 	db.wal = nil
 	db.ssts = nil
 	db.mem = nil
 	db.immMem = nil
+	db.manifest = nil
 
 	if firstError != nil {
 		return fmt.Errorf("beachdb: error closing DB: %w", firstError)
@@ -544,11 +524,23 @@ func (db *DB) flushLoop(doneCh chan struct{}) {
 
 		// Grab what we need under the lock
 		imm := db.immMem
+
+		// A concurrent rotation can hand off an empty memtable: two writers
+		// both pass the threshold check and queue on the flush slot, the
+		// first installs a fresh memtable, and the second freezes it before
+		// any write lands. Skip it — there is nothing to persist and an empty
+		// flush would record a zero-range file in the manifest.
+		if imm.Empty() {
+			db.immMem = nil
+			db.cond.Broadcast()
+			continue
+		}
+
 		sstPath := db.nextSSTPath()
 
 		// Release the lock for I/O - this is where the work happens
 		db.mu.Unlock()
-		newSSTableReader, err := writeSSTableFn(sstPath, imm, db.sstBlockSize)
+		flushResult, err := writeSSTableFn(sstPath, imm, db.sstBlockSize)
 
 		// Re-acquire the lock to publish the results
 		db.mu.Lock()
@@ -560,7 +552,7 @@ func (db *DB) flushLoop(doneCh chan struct{}) {
 		}
 
 		// Publish the new SSTable reader and clear the immutable memtable.
-		if err := db.publishFlushedSSTLocked(newSSTableReader); err != nil {
+		if err := db.publishFlushedSSTLocked(flushResult); err != nil {
 			db.flushErr = err
 			db.cond.Broadcast()
 			return
@@ -653,14 +645,51 @@ func (db *DB) flushMemtable() error {
 }
 
 // publishFlushedSSTLocked publishes a successfully flushed SSTable under db.mu.
-func (db *DB) publishFlushedSSTLocked(sstReader *sstable.Reader) error {
+func (db *DB) publishFlushedSSTLocked(flushResult sstWriteResult) error {
 	// FAILPOINT: sst_publish_error
 	if err := crashhook.MaybeFault(crashhook.FaultSSTPublishError); err != nil {
 		return fmt.Errorf("beachdb: publishing SSTable: %w", err)
 	}
 
+	// Create a new version edit and sync manifest with latest changes.
+	versionEdit := manifest.VersionEdit{
+		AddedFiles: []manifest.FileMetadata{
+			{
+				Level:       0,
+				FileID:      db.nextSSTID,
+				Size:        flushResult.size,
+				SmallestKey: flushResult.smallest,
+				LargestKey:  flushResult.largest,
+			},
+		},
+		HasNextFileID:   true,
+		NextFileID:      1 + db.nextSSTID,
+		HasLastSequence: true,
+		LastSequence:    db.seqno,
+	}
+
+	// The SSTable is already durable (writeSSTable synced the file and its
+	// parent directory); the manifest edit has not been appended yet.
+	// FAILPOINT: manifest_after_sst_sync
+	crashhook.CrashIfArmed(crashhook.PointManifestAfterSSTSync)
+
+	// Append the edit to the manifest --> this fsyncs the file + dir on disk!
+	if err := db.manifest.Append(versionEdit.Encode()); err != nil {
+		// The .sst file itself staying on disk is fine, it will be an orphan and will be
+		// deleted on the next `Open()`. nextSSTID isn't bumped so the id/path is reused.
+		_ = flushResult.reader.Close()
+		return fmt.Errorf("beachdb: appending flush edit to manifest: %w", err)
+	}
+
+	// The manifest edit is durable; the in-memory version has not been
+	// updated yet.
+	// FAILPOINT: manifest_after_append
+	crashhook.CrashIfArmed(crashhook.PointManifestAfterAppend)
+
+	// Update current version with the edit and append the sst reader to db.ssts
+	db.version = db.version.Apply(&versionEdit)
 	db.flushErr = nil
-	db.ssts = append(db.ssts, sstReader)
+	db.ssts = append(db.ssts, flushResult.reader)
 	db.immMem = nil
 	db.nextSSTID++
 
@@ -676,18 +705,372 @@ func (db *DB) nextSSTPath() string {
 	return filepath.Join(db.dir, buildSSTFileName(db.nextSSTID))
 }
 
+// openManifest reads the CURRENT pointer and dispatches to either the
+// fresh-database bootstrap or the existing-manifest replay path. After
+// it returns, db.version, db.manifest, db.nextSSTID, and db.seqno are
+// installed and ready for use.
+//
+// Dispatch:
+//
+//	CURRENT missing                  → bootstrapFreshManifest
+//	CURRENT exists but is empty      → hard error
+//	CURRENT points at missing file   → hard error
+//	manifest is corrupt mid-stream   → hard error
+//	manifest tail truncated by crash → benign, replay tolerates and trims
+//	CURRENT + manifest both intact   → replayExistingManifest
+//
+// "CURRENT missing" covers both the truly fresh directory and the case
+// where a prior bootstrap crashed before installing CURRENT (leaving an
+// orphan MANIFEST). CURRENT install is the final commit step of every
+// manifest creation, so an orphan MANIFEST without a CURRENT pointing at
+// it was never committed and the directory is effectively fresh.
+func openManifest(db *DB) error {
+	name, err := manifest.ReadCurrent(db.dir)
+	switch {
+	case errors.Is(err, manifest.ErrNoCurrentFile):
+		return bootstrapFreshManifest(db)
+	case err != nil:
+		// CURRENT exists but is empty or otherwise unreadable.
+		return fmt.Errorf("beachdb: reading CURRENT: %w", err)
+	}
+
+	return replayExistingManifest(db, name)
+}
+
+// bootstrapFreshManifest initializes the on-disk manifest state for a
+// brand-new database directory. It creates MANIFEST-000001, appends a
+// single VersionEdit carrying the initial counters (nextFileID=1,
+// lastSequence=0, logNumber=0), and atomically installs CURRENT so the
+// database is officially committed before Open returns.
+//
+// The CURRENT install is the commit barrier: until WriteCurrent succeeds,
+// nothing on disk points at the new manifest, so a crash anywhere before
+// that step leaves the directory looking fresh again on the next Open.
+// A crash *after* CURRENT install leaves a valid, replayable database.
+func bootstrapFreshManifest(db *DB) error {
+	version := manifest.NewVersion(0)
+
+	nextFileID := uint64(1)
+	seqno := uint64(0)
+	logno := uint64(0)
+
+	// Pick the next-available MANIFEST ID rather than hardcoding 1. A prior
+	// bootstrap may have crashed between manifest-create and CURRENT-install,
+	// leaving an orphan MANIFEST-NNNNNN. Reusing that name with O_APPEND
+	// would write our initial edit on top of the orphan's garbage bytes and
+	// corrupt the manifest stream on the next Open.
+	manifestID, err := nextAvailableManifestID(db.dir)
+	if err != nil {
+		return err
+	}
+	newManifestFileName := buildManifestFileName(manifestID)
+	newManifestFilePath := filepath.Join(db.dir, newManifestFileName)
+	manifestWriter, err := manifest.NewWriter(newManifestFilePath)
+	if err != nil {
+		return fmt.Errorf("beachdb: creating initial manifest: %w", err)
+	}
+
+	// Encode the initial counters. Has* flags must be true or Encode will
+	// silently drop the fields and the on-disk record will be header-only.
+	versionEdit := manifest.VersionEdit{
+		HasNextFileID:   true,
+		NextFileID:      nextFileID,
+		HasLastSequence: true,
+		LastSequence:    seqno,
+		HasLogNumber:    true,
+		LogNumber:       logno,
+	}
+
+	// Write the version edit to disk. On failure, close the writer and
+	// remove the partial manifest so the directory still looks fresh on
+	// the next Open.
+	if err := manifestWriter.Append(versionEdit.Encode()); err != nil {
+		_ = manifestWriter.Close()
+		_ = os.Remove(newManifestFilePath)
+		return fmt.Errorf("beachdb: writing initial manifest edit: %w", err)
+	}
+
+	// Apply to in-memory Version. Apply returns a new Version — assigning
+	// the result is required, otherwise the change is dropped.
+	version = version.Apply(&versionEdit)
+
+	// Install CURRENT — the commit barrier. Until this succeeds, the
+	// directory still looks fresh on the next Open and the orphan
+	// MANIFEST-000001 will be picked up by a future bootstrap.
+	if err := manifest.WriteCurrent(db.dir, newManifestFileName); err != nil {
+		_ = manifestWriter.Close()
+		_ = os.Remove(newManifestFilePath)
+		return fmt.Errorf("beachdb: installing CURRENT: %w", err)
+	}
+
+	db.version = version
+	db.manifest = manifestWriter
+	db.seqno = seqno
+	db.nextSSTID = nextFileID
+
+	return nil
+}
+
+// replayExistingManifest opens the manifest named by CURRENT and replays
+// every VersionEdit into a fresh Version, accumulating the file-number,
+// sequence, and log-number counters along the way. After replay it opens
+// readers for every SSTable referenced by the final Version and installs
+// everything on db.
+//
+// Error policy follows the bootstrap decision tree:
+//   - manifest file does not exist (CURRENT points at a missing file) →
+//     hard error (corruption — the database promised this file existed)
+//   - mid-stream corruption (bad checksum, bad magic, unknown tag,
+//     truncated edit body, invalid InternalKey) → hard error
+//   - trailing record.ErrTruncated (crash during write) → benign: truncate
+//     the manifest file to the last validated boundary and continue
+//   - referenced SSTable missing on disk → hard error
+//
+// manifestReplayResult holds the accumulated state from a manifest replay.
+type manifestReplayResult struct {
+	version     *manifest.Version
+	nextFileID  uint64
+	seqno       uint64
+	logNumber   uint64
+	validOffset int64
+	tailTrimmed bool
+}
+
+// applyEditToReplay folds one edit into the running replay state. Returns
+// an error if the edit re-adds a fileID already present in liveFiles
+// (corrupt or engine-buggy manifest).
+func applyEditToReplay(
+	edit *manifest.VersionEdit,
+	res *manifestReplayResult,
+	liveFiles map[uint64]struct{},
+	current string,
+	sawNextFileID *bool,
+) error {
+	for _, fm := range edit.AddedFiles {
+		if _, exists := liveFiles[fm.FileID]; exists {
+			return fmt.Errorf("beachdb: manifest %q: duplicate AddFile for fileID %d", current, fm.FileID)
+		}
+		liveFiles[fm.FileID] = struct{}{}
+	}
+	for _, d := range edit.DeletedFiles {
+		delete(liveFiles, d.FileID)
+	}
+
+	res.version = res.version.Apply(edit)
+	if edit.HasNextFileID {
+		res.nextFileID = edit.NextFileID
+		*sawNextFileID = true
+	}
+	if edit.HasLastSequence {
+		res.seqno = edit.LastSequence
+	}
+	if edit.HasLogNumber {
+		res.logNumber = edit.LogNumber
+	}
+	return nil
+}
+
+// replayManifestStream reads every record from reader, applies each
+// VersionEdit to a fresh Version, and accumulates counters. Trailing
+// record.ErrTruncated is treated as benign (sets tailTrimmed); any other
+// non-EOF error is mid-stream corruption and surfaces as an error.
+// Duplicate AddFile for the same fileID is corruption.
+func replayManifestStream(reader *manifest.Reader, current string) (manifestReplayResult, error) {
+	res := manifestReplayResult{version: manifest.NewVersion(0)}
+	// liveFiles tracks fileIDs currently in the Version so we can detect
+	// duplicate AddFile edits at replay time.
+	liveFiles := make(map[uint64]struct{})
+	var sawNextFileID bool
+
+	for {
+		edit, err := reader.NextEdit()
+		if errors.Is(err, io.EOF) || errors.Is(err, record.ErrTruncated) {
+			res.validOffset = reader.ValidOffset()
+			res.tailTrimmed = errors.Is(err, record.ErrTruncated)
+			if !sawNextFileID {
+				return res, fmt.Errorf("beachdb: manifest %q has no NextFileID counter — corrupt", current)
+			}
+			return res, nil
+		}
+		if err != nil {
+			return res, fmt.Errorf("beachdb: replaying manifest %q: %w", current, err)
+		}
+
+		if err := applyEditToReplay(edit, &res, liveFiles, current, &sawNextFileID); err != nil {
+			return res, err
+		}
+	}
+}
+
+// openSSTReadersForVersion opens an *sstable.Reader for every file in the
+// given Version, in level-ascending order. Returns a hard error if any
+// referenced SSTable file is missing or unreadable.
+func openSSTReadersForVersion(dir string, version *manifest.Version) ([]*sstable.Reader, error) {
+	readers := make([]*sstable.Reader, 0, len(version.AllFiles()))
+	for _, fm := range version.AllFiles() {
+		sstPath := filepath.Join(dir, buildSSTFileName(fm.FileID))
+		//nolint:gosec // G304: path is built from the trusted DB directory + manifest-tracked file ID
+		sstFile, err := os.Open(sstPath)
+		if err != nil {
+			return readers, fmt.Errorf("beachdb: opening SSTable %q referenced by manifest: %w", sstPath, err)
+		}
+		sstReader, err := sstable.OpenReader(sstFile)
+		if err != nil {
+			_ = sstFile.Close()
+			return readers, fmt.Errorf("beachdb: reading SSTable %q: %w", sstPath, err)
+		}
+		readers = append(readers, sstReader)
+	}
+	return readers, nil
+}
+
+// cleanupOrphanSSTables removes canonical SSTable files that exist on disk
+// but are not referenced by the manifest Version. Orphan cleanup is
+// best-effort: the manifest is still the source of truth, so a deletion
+// failure leaves a harmless file behind for a future Open to try again.
+func cleanupOrphanSSTables(dir string, version *manifest.Version) {
+	referenced := make(map[uint64]struct{})
+	for _, fm := range version.AllFiles() {
+		referenced[fm.FileID] = struct{}{}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		fileID, ok := parseSSTFileName(entry.Name())
+		if !ok {
+			continue
+		}
+		if _, exists := referenced[fileID]; exists {
+			continue
+		}
+
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
+}
+
+func replayExistingManifest(db *DB, current string) error {
+	manifestPath := filepath.Join(db.dir, current)
+
+	reader, err := manifest.NewReader(manifestPath)
+	if err != nil {
+		// Includes os.ErrNotExist: CURRENT names a manifest that no longer
+		// exists on disk — corruption, the database promised this file.
+		return fmt.Errorf("beachdb: opening manifest %q: %w", current, err)
+	}
+
+	res, replayErr := replayManifestStream(reader, current)
+	closeErr := reader.Close()
+	if replayErr != nil {
+		return replayErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("beachdb: closing manifest reader: %w", closeErr)
+	}
+
+	if res.tailTrimmed {
+		if err := os.Truncate(manifestPath, res.validOffset); err != nil {
+			return fmt.Errorf("beachdb: truncating manifest tail at %d: %w", res.validOffset, err)
+		}
+	}
+
+	cleanupOrphanSSTables(db.dir, res.version)
+
+	ssts, err := openSSTReadersForVersion(db.dir, res.version)
+	if err != nil {
+		return err
+	}
+
+	// Open a Writer on the same manifest file. NewWriter uses O_APPEND,
+	// so subsequent edits land at the (possibly truncated) EOF.
+	writer, err := manifest.NewWriter(manifestPath)
+	if err != nil {
+		return fmt.Errorf("beachdb: opening manifest writer: %w", err)
+	}
+
+	db.version = res.version
+	db.manifest = writer
+	db.ssts = ssts
+	db.nextSSTID = res.nextFileID
+	db.seqno = res.seqno
+	db.logno = res.logNumber
+
+	return nil
+}
+
+// sstWriteResult carries the outputs of writing a memtable to an on-disk
+// SSTable: the open reader plus the metadata needed to record the new
+// file in a manifest VersionEdit.
+type sstWriteResult struct {
+	// reader is an open handle to the freshly written SSTable, ready to
+	// serve reads.
+	reader *sstable.Reader
+
+	// smallest is the smallest InternalKey in the SSTable (first key in
+	// sorted order).
+	smallest keys.InternalKey
+
+	// largest is the largest InternalKey in the SSTable (last key in
+	// sorted order).
+	largest keys.InternalKey
+
+	// size is the SSTable file size in bytes.
+	size uint64
+}
+
+// writeMemtableEntries adds every entry of mem to writer in ascending
+// InternalKey order, returning the smallest and largest keys written. The
+// memtable yields keys in sorted order, so the first key is the smallest and
+// the last is the largest. It returns ErrFlushEmptyMemtable when the memtable
+// has no entries.
+func writeMemtableEntries(
+	writer *sstable.Writer,
+	mem memtable.Memtable,
+) (smallest, largest keys.InternalKey, err error) {
+	iter := mem.NewIterator()
+	iter.SeekToFirst()
+
+	first := true
+	for iter.Valid() {
+		key := iter.Key()
+		if addErr := writer.Add(key, iter.Value()); addErr != nil {
+			_ = iter.Close()
+			return smallest, largest, fmt.Errorf("beachdb: writing entry to SSTable: %w", addErr)
+		}
+		if first {
+			smallest = key
+			first = false
+		}
+		largest = key
+		iter.Next()
+	}
+	_ = iter.Close()
+
+	if first {
+		return smallest, largest, ErrFlushEmptyMemtable
+	}
+	return smallest, largest, nil
+}
+
 // Helper function for writing a memtable to an SSTable file on disk.
 // blockSize controls the target data block size; 0 means use the sstable default.
-func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.Reader, error) {
+func writeSSTable(path string, mem memtable.Memtable, blockSize int) (sstWriteResult, error) {
 	// FAILPOINT: sst_write_error
 	if err := crashhook.MaybeFault(crashhook.FaultSSTWriteError); err != nil {
-		return nil, fmt.Errorf("beachdb: writing SSTable: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: writing SSTable: %w", err)
 	}
 
 	// Create the new sstable file
 	sstFile, err := os.Create(path) //nolint:gosec // path constructed from trusted db.dir + formatted ID
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrCreatingSSTFile, err)
+		return sstWriteResult{}, fmt.Errorf("%w: %w", ErrCreatingSSTFile, err)
 	}
 	defer sstFile.Close()
 
@@ -701,31 +1084,27 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.R
 	writer, err := sstable.NewWriter(sstFile, writerOpts...)
 	if err != nil {
 		_ = os.Remove(path) //nolint:gosec // path is constructed from the trusted DB directory
-		return nil, fmt.Errorf("beachdb: creating SSTable writer: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: creating SSTable writer: %w", err)
 	}
 
-	// Iterate the immutable memtable and write entries to the SSTable
-	iter := mem.NewIterator()
-	iter.SeekToFirst()
-	for iter.Valid() {
-		if err := writer.Add(iter.Key(), iter.Value()); err != nil {
-			_ = writer.Close()
-			_ = iter.Close()
-			_ = os.Remove(path) //nolint:gosec // path is constructed from the trusted DB directory
-			return nil, fmt.Errorf("beachdb: writing entry to SSTable: %w", err)
-		}
-		iter.Next()
+	// Write every memtable entry to the SSTable, capturing the key range.
+	// An empty memtable is rejected (it would record a zero-value key range
+	// in the manifest).
+	smallestKey, largestKey, err := writeMemtableEntries(writer, mem)
+	if err != nil {
+		_ = writer.Close()
+		_ = os.Remove(path) //nolint:gosec // path is constructed from the trusted DB directory
+		return sstWriteResult{}, err
 	}
 
-	_ = iter.Close()
 	if err = writer.Close(); err != nil {
 		_ = os.Remove(path) //nolint:gosec // path is constructed from the trusted DB directory
-		return nil, fmt.Errorf("beachdb: closing SSTable writer: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: closing SSTable writer: %w", err)
 	}
 
 	// Sync parent directory so the new file's directory entry is durable
 	if err = fs.SyncDir(filepath.Dir(path)); err != nil {
-		return nil, fmt.Errorf("beachdb: syncing directory after flush: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: syncing directory after flush: %w", err)
 	}
 
 	// FAILPOINT: flush_after_file_sync
@@ -734,86 +1113,90 @@ func writeSSTable(path string, mem memtable.Memtable, blockSize int) (*sstable.R
 	// Re-open the file for reading
 	sstFileReadMode, err := os.Open(path) //nolint:gosec // path constructed from trusted db.dir + formatted ID
 	if err != nil {
-		return nil, fmt.Errorf("beachdb: opening SSTable for reading: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: opening SSTable for reading: %w", err)
 	}
 
 	// Create a reader for the newest sstable
 	sstReader, err := sstable.OpenReader(sstFileReadMode)
 	if err != nil {
 		_ = sstFileReadMode.Close()
-		return nil, fmt.Errorf("beachdb: error reading newly flushed SSTable: %w", err)
+		return sstWriteResult{}, fmt.Errorf("beachdb: error reading newly flushed SSTable: %w", err)
 	}
 
-	return sstReader, nil
+	fileSize := sstReader.FileSize()
+	if fileSize < 0 {
+		_ = sstReader.Close()
+		return sstWriteResult{}, fmt.Errorf("beachdb: SSTable %q reports negative size %d", path, fileSize)
+	}
+
+	result := sstWriteResult{
+		reader:   sstReader,
+		smallest: smallestKey,
+		largest:  largestKey,
+		size:     uint64(fileSize),
+	}
+	return result, nil
 }
 
-// Helper function for discovering SSTable files on disk
-func discoverSSTables(dir string) ([]string, uint64, error) {
-	dirEntries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, 0, fmt.Errorf("beachdb: reading directory: %w", err)
-	}
-
-	type sstableMeta struct {
-		id   uint64
-		name string
-	}
-
-	sstableFiles := make([]sstableMeta, 0, len(dirEntries))
-	seenIDs := make(map[uint64]string, len(dirEntries))
-
-	for _, entry := range dirEntries {
-		if !entry.Type().IsRegular() {
-			continue
-		}
-
-		fileName := entry.Name()
-		if filepath.Ext(fileName) != sstableFileExt {
-			continue
-		}
-
-		strID := strings.TrimSuffix(fileName, filepath.Ext(fileName))
-		parsedID, err := strconv.ParseUint(strID, 10, 64)
-		if err != nil {
-			return nil, 0, fmt.Errorf("beachdb: parsing SSTable ID %q: %w", fileName, err)
-		}
-		if existingName, exists := seenIDs[parsedID]; exists {
-			return nil, 0, fmt.Errorf("beachdb: duplicate SSTable ID %d in %q and %q", parsedID, existingName, fileName)
-		}
-
-		seenIDs[parsedID] = fileName
-		sstableFiles = append(sstableFiles, sstableMeta{
-			id:   parsedID,
-			name: fileName,
-		})
-	}
-
-	slices.SortFunc(sstableFiles, func(left, right sstableMeta) int {
-		switch {
-		case left.id < right.id:
-			return -1
-		case left.id > right.id:
-			return 1
-		default:
-			return strings.Compare(left.name, right.name)
-		}
-	})
-
-	names := make([]string, len(sstableFiles))
-	for i, file := range sstableFiles {
-		names[i] = file.name
-	}
-
-	var nextID uint64
-	if len(sstableFiles) > 0 {
-		nextID = sstableFiles[len(sstableFiles)-1].id + 1
-	}
-
-	return names, nextID, nil
-}
-
-// Helper function for building an SSTable file name from a
-// file ID number, e.g.: 1 --> 000001.sst
+// buildSSTFileName builds an SSTable file name from a file ID,
+// e.g.: 1 --> 000001.sst
 func buildSSTFileName(id uint64) string {
 	return fmt.Sprintf("%0*d%s", sstableFileIDWidth, id, sstableFileExt)
+}
+
+// parseSSTFileName extracts the file ID from a canonical BeachDB SSTable
+// filename. Non-canonical names are ignored by orphan cleanup.
+func parseSSTFileName(name string) (uint64, bool) {
+	if filepath.Ext(name) != sstableFileExt {
+		return 0, false
+	}
+
+	idStr := strings.TrimSuffix(name, sstableFileExt)
+	if len(idStr) != sstableFileIDWidth {
+		return 0, false
+	}
+	for _, ch := range idStr {
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+	}
+
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
+// buildManifestFileName builds a MANIFEST filename from a file ID,
+// e.g. 1 → "MANIFEST-000001".
+func buildManifestFileName(id uint64) string {
+	return fmt.Sprintf("%s%0*d", manifestFilePrefix, manifestFileIDWidth, id)
+}
+
+// nextAvailableManifestID returns the smallest MANIFEST file ID not yet
+// present in dir. Used by bootstrap to avoid colliding with an orphan
+// MANIFEST file left by a prior crashed bootstrap. Returns 1 if no
+// MANIFEST files exist.
+func nextAvailableManifestID(dir string) (uint64, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, fmt.Errorf("beachdb: scanning dir for MANIFEST files: %w", err)
+	}
+	var maxID uint64
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, manifestFilePrefix) {
+			continue
+		}
+		idStr := strings.TrimPrefix(name, manifestFilePrefix)
+		id, err := strconv.ParseUint(idStr, 10, 64)
+		if err != nil {
+			continue
+		}
+		if id > maxID {
+			maxID = id
+		}
+	}
+	return maxID + 1, nil
 }

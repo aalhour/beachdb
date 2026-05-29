@@ -1,4 +1,3 @@
-// Package engine implements the public storage engine API
 package engine
 
 /*
