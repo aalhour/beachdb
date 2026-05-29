@@ -2,6 +2,9 @@
 
 CYCLES ?= 100
 
+# Crash harness profile: `full` (uses CYCLES) or `ci` (fast deterministic preset).
+PROFILE ?= full
+
 # Bench knobs. Override on the CLI: `make bench PKG=./internal/wal BENCH=BenchmarkX BENCHTIME=3s`
 PKG ?= ./...
 BENCH ?= .
@@ -79,15 +82,16 @@ fuzz:
 		done; \
 	done
 
-## crash-check: Run the controller/worker crash harness ($(CYCLES) cycles) with a temporary workspace
+## crash-check: Run the controller/worker crash harness with a temporary workspace. `make crash-check PROFILE=ci`
 crash-check:
 	@set -eu; \
 	tmpdir=$$(mktemp -d /tmp/beachdb-crash.XXXXXX); \
 	dbdir="$$tmpdir/db"; \
 	artdir="$$tmpdir/artifacts"; \
-	echo "Running crash harness ($(CYCLES) cycles) in $$dbdir"; \
+	echo "Running crash harness (profile=$(PROFILE), cycles=$(CYCLES)) in $$dbdir"; \
 	echo ""; \
 	go run ./cmd/crash run \
+		--profile=$(PROFILE) \
 		--dbdir="$$dbdir" \
 		--artifact-dir="$$artdir" \
 		--cycles=$(CYCLES) \
