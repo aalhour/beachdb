@@ -283,23 +283,38 @@ The principle is the same one I follow in the WAL: reserved slots either don't f
 Example output:
 ```
 $ manifest_dump data/
-CURRENT → MANIFEST-000001
-Edit 0: NextFileID=1, LastSequence=0, LogNumber=1
-Edit 1: AddFile L0/7 size=1024 [apple..zebra]; NextFileID=8; LastSequence=42
-Edit 2: AddFile L0/8 size=2048 [alpha..yankee]; NextFileID=9; LastSequence=87
-End of MANIFEST (3 edits)
+Manifest: MANIFEST-000001
+Path:     data/MANIFEST-000001
 
-Reconstructed Version:
-  L0: [7, 8]
+Edit #0:
+  next_file_id:  1
+  last_sequence: 0
+  log_number:    0
+Edit #1:
+  next_file_id:  2
+  last_sequence: 42
+  add_file:    level=0 id=1 size=1024 smallest="apple/40/Put" largest="zebra/42/Put"
+Edit #2:
+  next_file_id:  3
+  last_sequence: 87
+  add_file:    level=0 id=2 size=2048 smallest="alpha/80/Put" largest="yankee/87/Put"
+Current Version:
+  Level 0: 2 files (3072 bytes total)
+    [1] apple..zebra (1024 bytes)
+    [2] alpha..yankee (2048 bytes)
 ```
 
-On corruption:
+On corruption, the tool prints the `Version` reconstructed up to the failure,
+reports the last valid edit, and exits non-zero:
 ```
 $ manifest_dump data/
-CURRENT → MANIFEST-000001
-Edit 0: NextFileID=1, LastSequence=0
-Edit 1: checksum mismatch (expected 0xABCD1234, got 0xDEADBEEF)
-Stopped at edit 1
+...
+Current Version:
+  Level 0: 1 files (1024 bytes total)
+    [1] apple..zebra (1024 bytes)
+
+Last valid edit: #1
+Error: corrupt manifest at edit #2: beachdb/record: checksum mismatch
 ```
 
 ---
